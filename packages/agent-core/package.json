@@ -1,10 +1,17 @@
 {
   "name": "@azure-browser-agent/agent-core",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Shared contracts, policy, and deterministic logic for browser-agent runs",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc --build",
+    "check": "tsc --build --pretty false",
+    "clean": "tsc --build --clean"
   },
   "keywords": [],
   "author": "",

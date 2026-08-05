@@ -29,4 +29,36 @@ Webページを視覚的・意味的に理解し、自然言語の指示に応�
 
 ## Status
 
-Project scaffolding in progress. See `HANDOFF.md` for the current design and implementation plan.
+The first runnable milestone is available:
+
+- asynchronous in-memory Run API
+- typed browser action and observation contracts
+- domain, mode, step-count, and duration policy boundaries
+- mock `screenshot -> decision -> one action -> screenshot` worker loop
+- Web Console showing status, action, observations, and verification evidence
+
+The worker does not connect to DeskNet's yet. It only permits the local mock scenario.
+
+## Run locally
+
+Build all workspaces:
+
+```bash
+npm run build
+```
+
+Start the Agent API in one terminal:
+
+```bash
+npm run dev:api
+```
+
+Start the Web Console in another terminal:
+
+```bash
+npm run dev:web
+```
+
+Then open `http://127.0.0.1:3000`.
+
+See `HANDOFF.md` for the broader design and implementation plan.

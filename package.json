@@ -1,10 +1,14 @@
 {
   "name": "azure-browser-agent",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Safe browser-agent proof of concept",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc --build",
+    "check": "tsc --build --pretty false",
+    "clean": "tsc --build --clean",
+    "dev:api": "npm run dev --workspace @azure-browser-agent/agent-api",
+    "dev:web": "npm run dev --workspace @azure-browser-agent/web-console",
+    "test": "npm run check"
   },
   "keywords": [],
   "author": "",

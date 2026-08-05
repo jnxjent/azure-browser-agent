@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Azure Browser Agent</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, "Noto Sans JP", system-ui, sans-serif;
+        background: #07111f;
+        color: #e8f0fb;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, #173054, #07111f 48%); }
+      main { width: min(1080px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0; }
+      header { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+      h1 { margin: 0; font-size: clamp(28px, 5vw, 48px); letter-spacing: -0.04em; }
+      h2 { margin: 0 0 16px; font-size: 18px; }
+      p { color: #a9bad0; line-height: 1.7; }
+      .badge { border: 1px solid #31557e; border-radius: 999px; padding: 7px 12px; color: #8fc7ff; white-space: nowrap; }
+      .grid { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 20px; }
+      .card { border: 1px solid #243a55; border-radius: 18px; padding: 22px; background: rgba(10, 25, 43, 0.84); box-shadow: 0 18px 70px rgba(0,0,0,.2); }
+      label { display: block; margin-bottom: 8px; color: #c8d5e5; font-size: 14px; }
+      textarea { width: 100%; min-height: 130px; resize: vertical; border: 1px solid #315071; border-radius: 12px; padding: 14px; background: #081421; color: inherit; font: inherit; }
+      textarea:focus { outline: 2px solid #42a5f5; border-color: transparent; }
+      button { margin-top: 14px; width: 100%; border: 0; border-radius: 12px; padding: 13px 18px; background: #3da2ff; color: #04111f; font-weight: 800; cursor: pointer; }
+      button:disabled { cursor: wait; opacity: .55; }
+      .status { display: flex; align-items: center; gap: 10px; min-height: 32px; }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: #60758e; }
+      .dot.running { background: #ffd166; box-shadow: 0 0 14px #ffd166; }
+      .dot.completed { background: #65df9b; box-shadow: 0 0 14px #65df9b; }
+      .dot.failed { background: #ff7085; }
+      .timeline { display: grid; gap: 12px; margin-top: 18px; }
+      .step { border-left: 2px solid #315071; padding: 3px 0 3px 16px; }
+      .step strong { display: block; margin-bottom: 5px; }
+      .muted { color: #8396ad; font-size: 13px; }
+      pre { margin: 10px 0 0; padding: 12px; overflow: auto; border-radius: 10px; background: #050d17; color: #b9d8f7; font-size: 12px; white-space: pre-wrap; }
+      .empty { padding: 48px 12px; text-align: center; color: #71859e; }
+      @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } header { align-items: start; flex-direction: column; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <div class="muted">READ-ONLY POC</div>
+          <h1>Azure Browser Agent</h1>
+          <p>認識・判断・操作・検証を、ひとつのRunとして追跡します。</p>
+        </div>
+        <div class="badge">Mock site · safe mode</div>
+      </header>
+      <div class="grid">
+        <section class="card">
+          <h2>新しいRun</h2>
+          <form id="run-form">
+            <label for="prompt">Agentへの指示</label>
+            <textarea id="prompt" required>Aさん、Bさん、Cさんの空き時間を調べて</textarea>
+            <button id="submit" type="submit">読み取り専用で実行</button>
+          </form>
+          <p class="muted">この段階では実サイトを操作せず、モック画面への1操作だけを実行します。</p>
+        </section>
+        <section class="card">
+          <h2>Run details</h2>
+          <div id="output" class="empty">Runを開始すると、ここに状態と証跡が表示されます。</div>
+        </section>
+      </div>
+    </main>
+    <script>
+      const apiBase = "http://127.0.0.1:3001";
+      const form = document.querySelector("#run-form");
+      const promptInput = document.querySelector("#prompt");
+      const submit = document.querySelector("#submit");
+      const output = document.querySelector("#output");
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submit.disabled = true;
+        output.className = "";
+        output.textContent = "Runを作成しています…";
+        try {
+          const response = await fetch(`${apiBase}/browser-agent/runs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ site: "mock", mode: "read", prompt: promptInput.value }),
+          });
+          const run = await response.json();
+          if (!response.ok) throw new Error(run.error ?? "Runの作成に失敗しました。");
+          render(run);
+          await poll(run.id);
+        } catch (error) {
+          renderError(error);
+        } finally {
+          submit.disabled = false;
+        }
+      });
+
+      async function poll(runId) {
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          const response = await fetch(`${apiBase}/browser-agent/runs/${runId}`);
+          const run = await response.json();
+          if (!response.ok) throw new Error(run.error ?? "Runの取得に失敗しました。");
+          render(run);
+          if (["completed", "failed", "cancelled"].includes(run.status)) return;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        throw new Error("Runの完了待ちがタイムアウトしました。");
+      }
+
+      function render(run) {
+        output.replaceChildren();
+        const status = element("div", "status");
+        status.append(element("span", `dot ${run.status}`), element("strong", "", run.status));
+        output.append(status, element("div", "muted", `Run ID: ${run.id}`));
+
+        const timeline = element("div", "timeline");
+        for (const step of run.steps) {
+          const item = element("div", "step");
+          item.append(
+            element("strong", "", `Step ${step.sequence}: ${step.action.type}`),
+            element("div", "muted", step.reasoning),
+            element("pre", "", JSON.stringify({
+              before: step.observationBefore.summary,
+              action: step.action,
+              after: step.observationAfter.summary,
+              verified: step.verified,
+            }, null, 2)),
+          );
+          timeline.append(item);
+        }
+        output.append(timeline);
+        if (run.result) output.append(element("p", "", run.result.summary));
+        if (run.error) output.append(element("p", "", run.error));
+      }
+
+      function renderError(error) {
+        output.replaceChildren(element("div", "status", error instanceof Error ? error.message : String(error)));
+      }
+
+      function element(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text) node.textContent = text;
+        return node;
+      }
+    </script>
+  </body>
+</html>

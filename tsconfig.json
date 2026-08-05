@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/agent-core" },
+    { "path": "services/browser-worker" },
+    { "path": "services/agent-api" },
+    { "path": "apps/web-console" }
+  ]
+}

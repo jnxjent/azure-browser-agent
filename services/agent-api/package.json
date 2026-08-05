@@ -1,12 +1,21 @@
 {
   "name": "@azure-browser-agent/agent-api",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Asynchronous Run API for browser-agent clients",
+  "type": "module",
+  "main": "dist/server.js",
+  "types": "dist/server.d.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc --build",
+    "check": "tsc --build --pretty false",
+    "dev": "node --enable-source-maps dist/server.js",
+    "clean": "tsc --build --clean"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "@azure-browser-agent/agent-core": "1.0.0",
+    "@azure-browser-agent/browser-worker": "1.0.0"
+  }
 }
