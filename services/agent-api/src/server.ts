@@ -1,4 +1,6 @@
+import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   createRun,
@@ -67,6 +69,20 @@ async function route(
     const run = runs.get(runId);
     if (run === undefined) {
       sendJson(response, 404, { error: "Run not found." });
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      segments.length === 5 &&
+      segments[3] === "artifacts"
+    ) {
+      const filename = segments[4];
+      if (filename !== "before.png" && filename !== "after.png") {
+        sendJson(response, 404, { error: "Artifact not found." });
+        return;
+      }
+      await sendArtifact(response, runId, filename);
       return;
     }
 
@@ -194,6 +210,34 @@ function sendJson(
 ): void {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
+}
+
+async function sendArtifact(
+  response: ServerResponse,
+  runId: string,
+  filename: "before.png" | "after.png",
+): Promise<void> {
+  const artifactPath = resolve(process.cwd(), "screenshots", runId, filename);
+  try {
+    const image = await readFile(artifactPath);
+    response.writeHead(200, {
+      "Content-Type": "image/png",
+      "Content-Length": image.byteLength,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.end(image);
+  } catch (error) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? error.code
+        : undefined;
+    if (code === "ENOENT") {
+      sendJson(response, 404, { error: "Artifact not found." });
+      return;
+    }
+    throw error;
+  }
 }
 
 if (process.argv[1] !== undefined) {

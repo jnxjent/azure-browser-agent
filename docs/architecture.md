@@ -9,13 +9,15 @@ The services are separate npm workspaces so the future AzureChat integration can
 
 The current Run Store is deliberately in-memory. Before deployment it must be replaced by a durable store and queue, and the Browser Worker must run in an isolated environment.
 
-The mock worker proves one bounded loop:
+The mock worker uses headless Chromium to prove one bounded loop:
 
-1. capture an observation
+1. render an isolated in-memory mock portal and capture a PNG observation
 2. select one typed action
 3. pass the action through policy checks
 4. execute the mock action
-5. capture a second observation
+5. capture a second PNG observation
 6. verify the expected screen evidence
 
-No Azure OpenAI request, real browser session, or DeskNet's access occurs in this milestone.
+The PNG files are written under the ignored `screenshots/` directory and are only exposed through a run-scoped API route with fixed artifact names.
+
+No Azure OpenAI request or DeskNet's access occurs in this milestone.

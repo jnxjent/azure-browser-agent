@@ -36,6 +36,10 @@
       .step strong { display: block; margin-bottom: 5px; }
       .muted { color: #8396ad; font-size: 13px; }
       pre { margin: 10px 0 0; padding: 12px; overflow: auto; border-radius: 10px; background: #050d17; color: #b9d8f7; font-size: 12px; white-space: pre-wrap; }
+      .evidence { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+      figure { margin: 0; min-width: 0; }
+      figure img { display: block; width: 100%; aspect-ratio: 11 / 7; object-fit: cover; object-position: top; border: 1px solid #315071; border-radius: 10px; background: #050d17; }
+      figcaption { margin-top: 6px; color: #8396ad; font-size: 12px; }
       .empty { padding: 48px 12px; text-align: center; color: #71859e; }
       @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } header { align-items: start; flex-direction: column; } }
     </style>
@@ -126,6 +130,12 @@
               verified: step.verified,
             }, null, 2)),
           );
+          const evidence = element("div", "evidence");
+          evidence.append(
+            screenshot(step.observationBefore.screenshotRef, "操作前"),
+            screenshot(step.observationAfter.screenshotRef, "操作後"),
+          );
+          item.append(evidence);
           timeline.append(item);
         }
         output.append(timeline);
@@ -142,6 +152,16 @@
         if (className) node.className = className;
         if (text) node.textContent = text;
         return node;
+      }
+
+      function screenshot(reference, caption) {
+        const figure = document.createElement("figure");
+        const image = document.createElement("img");
+        image.src = `${apiBase}${reference}`;
+        image.alt = `${caption}のブラウザ証跡`;
+        image.loading = "lazy";
+        figure.append(image, element("figcaption", "", caption));
+        return figure;
       }
     </script>
   </body>

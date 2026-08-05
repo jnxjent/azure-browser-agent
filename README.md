@@ -34,8 +34,8 @@ The first runnable milestone is available:
 - asynchronous in-memory Run API
 - typed browser action and observation contracts
 - domain, mode, step-count, and duration policy boundaries
-- mock `screenshot -> decision -> one action -> screenshot` worker loop
-- Web Console showing status, action, observations, and verification evidence
+- Playwright/Chromium `screenshot -> decision -> one action -> screenshot` loop against an isolated mock page
+- Web Console showing status, action, observations, verification, and before/after screenshots
 
 The worker does not connect to DeskNet's yet. It only permits the local mock scenario.
 

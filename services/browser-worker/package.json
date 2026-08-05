@@ -17,6 +17,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@azure-browser-agent/agent-core": "1.0.0"
+    "@azure-browser-agent/agent-core": "1.0.0",
+    "playwright": "^1.62.1"
   }
 }

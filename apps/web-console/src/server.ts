@@ -19,6 +19,7 @@ const server = createServer(async (request, response) => {
         "script-src 'self' 'unsafe-inline'",
         "style-src 'self' 'unsafe-inline'",
         "connect-src http://127.0.0.1:3001 http://localhost:3001",
+        "img-src 'self' http://127.0.0.1:3001 http://localhost:3001",
       ].join("; "),
       "X-Content-Type-Options": "nosniff",
     });
