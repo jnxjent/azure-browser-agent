@@ -1,0 +1,32 @@
+# Azure Browser Agent
+
+Webページを視覚的・意味的に理解し、自然言語の指示に応じて安全にブラウザを操作するAgenticアプリのPoCです。
+
+## Initial scope
+
+最初の対象はDeskNet'sのスケジュール機能です。
+
+- ログイン済み画面からスケジュールを開く
+- 複数人の予定を読み取る
+- 共通の空き時間を計算する
+- 候補をWeb Consoleに表示する
+
+初期PoCは読み取り専用とし、登録などの副作用がある操作は後から承認フロー付きで追加します。
+
+## Planned structure
+
+- `apps/web-console`: PoC操作画面
+- `services/agent-api`: Agent実行API
+- `services/browser-worker`: Playwright実行プロセス
+- `packages/agent-core`: 計画・Policy・検証
+- `runbooks/desknets`: DeskNet's操作知識
+- `docs`: 設計資料
+
+## Requirements
+
+- Node.js 20
+- npm 10
+
+## Status
+
+Project scaffolding in progress. See `HANDOFF.md` for the current design and implementation plan.
