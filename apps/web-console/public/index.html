@@ -41,6 +41,8 @@
       figure img { display: block; width: 100%; aspect-ratio: 11 / 7; object-fit: cover; object-position: top; border: 1px solid #315071; border-radius: 10px; background: #050d17; }
       figcaption { margin-top: 6px; color: #8396ad; font-size: 12px; }
       .empty { padding: 48px 12px; text-align: center; color: #71859e; }
+      .candidate { margin-top: 14px; padding: 14px; border: 1px solid #277a65; border-radius: 11px; background: rgba(31, 137, 103, .12); }
+      .candidate strong { color: #65dfb1; }
       @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } header { align-items: start; flex-direction: column; } }
     </style>
   </head>
@@ -117,6 +119,19 @@
         status.append(element("span", `dot ${run.status}`), element("strong", "", run.status));
         output.append(status, element("div", "muted", `Run ID: ${run.id}`));
 
+        if (run.result) {
+          output.append(element("p", "", run.result.summary));
+          for (const slot of run.result.availability ?? []) {
+            const candidate = element("div", "candidate");
+            candidate.append(
+              element("strong", "", "共通の空き時間"),
+              element("div", "", formatSlot(slot)),
+              element("div", "muted", `参加者: ${slot.participantIds.join(", ")}`),
+            );
+            output.append(candidate);
+          }
+        }
+
         const timeline = element("div", "timeline");
         for (const step of run.steps) {
           const item = element("div", "step");
@@ -139,7 +154,6 @@
           timeline.append(item);
         }
         output.append(timeline);
-        if (run.result) output.append(element("p", "", run.result.summary));
         if (run.error) output.append(element("p", "", run.error));
       }
 
@@ -162,6 +176,16 @@
         image.loading = "lazy";
         figure.append(image, element("figcaption", "", caption));
         return figure;
+      }
+
+      function formatSlot(slot) {
+        const formatter = new Intl.DateTimeFormat("ja-JP", {
+          month: "numeric",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        return `${formatter.format(new Date(slot.start))} ～ ${formatter.format(new Date(slot.end))}`;
       }
     </script>
   </body>

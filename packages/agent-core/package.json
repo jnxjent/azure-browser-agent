@@ -11,7 +11,8 @@
   "scripts": {
     "build": "tsc --build",
     "check": "tsc --build --pretty false",
-    "clean": "tsc --build --clean"
+    "clean": "tsc --build --clean",
+    "test": "node --test dist/availability.test.js"
   },
   "keywords": [],
   "author": "",

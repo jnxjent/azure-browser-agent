@@ -3,9 +3,11 @@ import { resolve } from "node:path";
 import {
   assertActionAllowed,
   assertRunAllowed,
+  findCommonAvailability,
   type BrowserAction,
   type BrowserRun,
   type Observation,
+  type ParticipantSchedule,
   type RunExecutor,
   type RunLimits,
 } from "@azure-browser-agent/agent-core";
@@ -59,6 +61,15 @@ export class MockBrowserWorker implements RunExecutor {
         artifactDirectory,
       );
       const verified = observationAfter.visibleElements.includes("Schedule table");
+      const schedules = await extractSchedules(page);
+      const availability = findCommonAvailability({
+        window: {
+          start: "2026-08-05T09:00:00+09:00",
+          end: "2026-08-05T12:00:00+09:00",
+        },
+        durationMinutes: 60,
+        schedules,
+      });
       const now = new Date().toISOString();
 
       return {
@@ -79,19 +90,43 @@ export class MockBrowserWorker implements RunExecutor {
         ],
         result: {
           summary: verified
-            ? "Chromium opened the mock schedule and verified its visible table."
+            ? `Chromium verified the schedule and found ${availability.length} common one-hour slot.`
             : "Chromium completed the action, but the expected table was not verified.",
           evidence: [
             observationBefore.screenshotRef,
             observationAfter.screenshotRef,
             `Page title: ${observationAfter.pageTitle}`,
           ],
+          availability,
         },
       };
     } finally {
       await browser.close();
     }
   }
+}
+
+async function extractSchedules(page: Page): Promise<ParticipantSchedule[]> {
+  return page.locator("tbody tr").evaluateAll((rows) => {
+    const slotHeaders = Array.from(
+      document.querySelectorAll<HTMLTableCellElement>("th[data-start][data-end]"),
+    ).map((header) => ({
+      start: header.dataset.start ?? "",
+      end: header.dataset.end ?? "",
+    }));
+
+    return rows.map((row) => {
+      const participantId = row.getAttribute("data-participant-id") ?? "";
+      const statuses = Array.from(row.querySelectorAll<HTMLTableCellElement>("td[data-status]"));
+      return {
+        participantId,
+        busy: statuses.flatMap((cell, index) => {
+          const slot = slotHeaders[index];
+          return cell.dataset.status === "busy" && slot !== undefined ? [slot] : [];
+        }),
+      };
+    });
+  });
 }
 
 function planSingleAction(_prompt: string): BrowserAction {
@@ -190,11 +225,11 @@ const MOCK_PORTAL_HTML = String.raw`<!doctype html>
       <h1 data-agent-label="Schedule heading">Team schedule</h1>
       <p data-agent-label="Date range">Wednesday, August 5 · 09:00–18:00</p>
       <table data-agent-label="Schedule table">
-        <thead><tr><th>Participant</th><th>09:00–10:00</th><th>10:00–11:00</th><th>11:00–12:00</th></tr></thead>
+        <thead><tr><th>Participant</th><th data-start="2026-08-05T09:00:00+09:00" data-end="2026-08-05T10:00:00+09:00">09:00–10:00</th><th data-start="2026-08-05T10:00:00+09:00" data-end="2026-08-05T11:00:00+09:00">10:00–11:00</th><th data-start="2026-08-05T11:00:00+09:00" data-end="2026-08-05T12:00:00+09:00">11:00–12:00</th></tr></thead>
         <tbody>
-          <tr><td>A</td><td class="free">Free</td><td class="busy">Busy</td><td class="free">Free</td></tr>
-          <tr><td>B</td><td class="free">Free</td><td class="free">Free</td><td class="busy">Busy</td></tr>
-          <tr><td>C</td><td class="free">Free</td><td class="busy">Busy</td><td class="free">Free</td></tr>
+          <tr data-participant-id="A"><td>A</td><td class="free" data-status="free">Free</td><td class="busy" data-status="busy">Busy</td><td class="free" data-status="free">Free</td></tr>
+          <tr data-participant-id="B"><td>B</td><td class="free" data-status="free">Free</td><td class="free" data-status="free">Free</td><td class="busy" data-status="busy">Busy</td></tr>
+          <tr data-participant-id="C"><td>C</td><td class="free" data-status="free">Free</td><td class="busy" data-status="busy">Busy</td><td class="free" data-status="free">Free</td></tr>
         </tbody>
       </table>
     </template>

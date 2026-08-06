@@ -55,6 +55,7 @@ export interface BrowserRun {
   result?: {
     summary: string;
     evidence: string[];
+    availability?: CommonAvailabilitySlot[];
   };
   error?: string;
 }
@@ -68,3 +69,4 @@ export interface RunLimits {
 export interface RunExecutor {
   execute(run: BrowserRun, signal: AbortSignal): Promise<BrowserRun>;
 }
+import type { CommonAvailabilitySlot } from "./availability.js";

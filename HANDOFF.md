@@ -246,15 +246,33 @@ Project名は汎用性を優先して `azure-browser-agent` とした。DeskNet'
 C:\Users\021213\azure-browser-agent
 ```
 
-実行済みコマンド:
+現在の実装:
+
+- npm workspacesとTypeScript Project Referencesによるmonorepo
+- Web Console、Agent API、Browser Worker、Agent Coreの分離
+- 非同期Run APIとin-memory Run Store
+- 読み取り専用、許可ドメイン、最大ステップ、最大時間のPolicy境界
+- Playwright/Chromiumによる隔離モック画面の実操作
+- 操作前後PNGの保存、Run単位のAPI配信、Web Console表示
+- DOM-backed clickと操作後画面の証拠検証
+- 複数人のbusy intervalから共通空き時間を求める決定論的ロジック
+- 正常系、重複interval、境界、不正入力の自動テスト
+
+動作確認済み:
 
 ```bash
-cd /c/Users/021213/azure-browser-agent
-git init -b main
-npm init -y
+npm test
+npm run dev:api
+npm run dev:web
 ```
 
-現時点では空のGitリポジトリに、npmが生成したルート`package.json`だけが存在する。
+モックRunではChromiumが予定表を開き、A・B・Cの共通空き時間を構造化して返す。Azure OpenAIとDeskNet'sにはまだ接続していない。スクリーンショットはGit管理外の`screenshots/`に保存される。
+
+主要コミット:
+
+- `d70256e` 初期monorepo
+- `ae79b8c` 実行可能なモックRun
+- `e6c5c67` Playwright実ブラウザと画像証跡
 
 ## 12. 推奨するProject構成
 
@@ -277,15 +295,15 @@ PoCだからといってWeb画面にAgentロジックを入れず、最初から
 
 ## 13. 次の作業
 
-新しいVS Codeで `C:\Users\021213\azure-browser-agent` を開き、このメモを読んでから以下をOneByOneで進める。
+DeskNet'sの読み取り専用PoCへ進む。以下をOneByOneで行う。
 
-1. Gitの状態とNode.js/npmバージョンを確認する。
-2. `.gitignore`、README、環境変数サンプルを作成する。
-3. npm workspacesを使った最小monorepo構成を作成する。
-4. TypeScript共通設定を作成する。
-5. PoC Web Console、Agent API、Browser Worker、Agent Coreの空の境界を作る。
-6. モックサイトで screenshot -> 判断 -> 1操作 -> screenshot の最小ループを実装する。
-7. DeskNet'sの読み取り専用PoCへ進む。
+1. 接続URL、社内ネットワーク/VPN要否、SSO/MFA、セッション条件を確認する。
+2. 秘密情報を含まない画面構造またはマスキング済みスクリーンショットを確認する。
+3. 実ドメインを`ALLOWED_DOMAINS`へ設定し、認証済みセッションの安全な受け渡し方法を決める。
+4. DeskNet's Runbookへ画面識別手掛かり、許可操作、成功証拠、復旧条件を追記する。
+5. Playwrightでスケジュール画面まで読み取り専用ナビゲーションを実装する。
+6. 参加者、日付範囲、busy intervalを構造化抽出し、既存の共通空き時間ロジックへ渡す。
+7. Web Consoleへ候補と画面証跡を表示し、実環境で検証する。
 
 ## 14. 作業上のルール
 
@@ -296,7 +314,42 @@ PoCだからといってWeb画面にAgentロジックを入れず、最初から
 - 既存のAzureChatはPhase 1では変更しない。
 - PoCで境界と安全性を検証した後にAzureChat連携へ進む。
 
-## 15. 参考資料
+## 15. 作業中断時点（2026-08-05）
+
+次の打ち合わせのため、以下の状態で安全に作業を中断した。
+
+- Agent APIとWeb Consoleは両方停止済み。
+- 最新コミットは`e6c5c67`（Playwright実ブラウザと画像証跡）。
+- その後の共通空き時間機能は実装済みだが、まだ未コミット。
+- Chromiumがモック予定表を読み取り、A・B・Cの共通空き時間`2026-08-05 09:00–10:00 JST`を1件返すE2Eを確認済み。
+- `npm test`は4件すべて合格、`npm audit`は脆弱性0件。
+- Web Consoleで`completed`、`verified: true`、操作前後画像、`found 1 common one-hour slot`まで確認済み。
+- 共通空き時間カードが画像より下で見切れたため、Run details上部へ移動済み。この最後の表示順変更だけはブラウザでの再確認前。
+
+未コミット差分の主な内容:
+
+- `packages/agent-core/src/availability.ts`
+- `packages/agent-core/src/availability.test.ts`
+- Chromium予定表からbusy intervalを構造化抽出する処理
+- Run結果の`availability`契約
+- Web Consoleの共通空き時間表示
+- README、Architecture、HANDOFFの更新
+
+再開時の最初のコマンド:
+
+```bash
+git status --short
+```
+
+その後、`npm test`、Agent APIとWeb Consoleの起動、表示順の最終確認を行い、問題がなければ以下の趣旨でコミットする。
+
+```text
+feat: calculate common availability from schedules
+```
+
+次の実装フェーズはDeskNet's読み取り専用接続。実環境へ進む前に、接続URL、VPN、SSO/MFA、セッション条件、マスキング済み画面情報を確認する。
+
+## 16. 参考資料
 
 - OpenAI Computer Use guide: https://developers.openai.com/api/docs/guides/tools-computer-use
 - Azure AI Foundry Computer Use: https://learn.microsoft.com/en-us/azure/ai-foundry/agents/how-to/tools/computer-use
@@ -304,4 +357,3 @@ PoCだからといってWeb画面にAgentロジックを入れず、最初から
 - MDN file input: https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/input/file
 - Microsoft Graph file upload: https://learn.microsoft.com/en-us/graph/api/driveitem-put-content
 - Microsoft Graph large file upload: https://learn.microsoft.com/en-us/graph/sdks/large-file-upload
-

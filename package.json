@@ -8,7 +8,7 @@
     "clean": "tsc --build --clean",
     "dev:api": "npm run dev --workspace @azure-browser-agent/agent-api",
     "dev:web": "npm run dev --workspace @azure-browser-agent/web-console",
-    "test": "npm run check"
+    "test": "npm run check && npm run test --workspace @azure-browser-agent/agent-core"
   },
   "keywords": [],
   "author": "",

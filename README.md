@@ -36,6 +36,7 @@ The first runnable milestone is available:
 - domain, mode, step-count, and duration policy boundaries
 - Playwright/Chromium `screenshot -> decision -> one action -> screenshot` loop against an isolated mock page
 - Web Console showing status, action, observations, verification, and before/after screenshots
+- deterministic common-availability calculation from structured participant schedules
 
 The worker does not connect to DeskNet's yet. It only permits the local mock scenario.
 
