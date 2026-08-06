@@ -20,6 +20,17 @@ export function assertActionAllowed(
   action: BrowserAction,
   limits: RunLimits,
 ): void {
+  if (
+    action.type === "click" &&
+    ["追加", "登録", "保存", "送信", "削除", "submit"].includes(
+      action.target.trim().toLowerCase(),
+    )
+  ) {
+    throw new PolicyViolationError(
+      `Read-only policy prohibits the final action: ${action.target}`,
+    );
+  }
+
   if (action.type !== "open_page") {
     return;
   }

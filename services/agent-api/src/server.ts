@@ -7,11 +7,15 @@ import {
   validateCreateRunInput,
   type BrowserRun,
 } from "@azure-browser-agent/agent-core";
-import { MockBrowserWorker } from "@azure-browser-agent/browser-worker";
+import {
+  DeskNetsBrowserWorker,
+  MockBrowserWorker,
+} from "@azure-browser-agent/browser-worker";
 
 const runs = new Map<string, BrowserRun>();
 const controllers = new Map<string, AbortController>();
-const worker = new MockBrowserWorker();
+const mockWorker = new MockBrowserWorker();
+const deskNetsWorker = new DeskNetsBrowserWorker();
 
 export const server = createServer(async (request, response) => {
   setCorsHeaders(request, response);
@@ -131,6 +135,8 @@ function startRun(runId: string): void {
   };
   runs.set(runId, running);
 
+  const worker =
+    running.input.site === "desknets" ? deskNetsWorker : mockWorker;
   void worker
     .execute(running, controller.signal)
     .then((completed) => runs.set(runId, completed))

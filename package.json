@@ -6,9 +6,10 @@
     "build": "tsc --build",
     "check": "tsc --build --pretty false",
     "clean": "tsc --build --clean",
+    "auth:desknets": "npm run auth:desknets --workspace @azure-browser-agent/browser-worker --",
     "dev:api": "npm run dev --workspace @azure-browser-agent/agent-api",
     "dev:web": "npm run dev --workspace @azure-browser-agent/web-console",
-    "test": "npm run check && npm run test --workspace @azure-browser-agent/agent-core"
+    "test": "npm run check && npm run test --workspace @azure-browser-agent/agent-core && npm run test --workspace @azure-browser-agent/browser-worker"
   },
   "keywords": [],
   "author": "",

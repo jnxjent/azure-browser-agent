@@ -37,8 +37,15 @@ The first runnable milestone is available:
 - Playwright/Chromium `screenshot -> decision -> one action -> screenshot` loop against an isolated mock page
 - Web Console showing status, action, observations, verification, and before/after screenshots
 - deterministic common-availability calculation from structured participant schedules
+- deterministic filtering for slots with at least one available meeting facility
+- manual two-stage login in a dedicated Edge profile
+- loopback-only CDP connection to an authenticated DeskNet's tab
+- structured extraction of participant and company-wide facility busy intervals
 
-The worker does not connect to DeskNet's yet. It only permits the local mock scenario.
+The DeskNet's milestone is deliberately semi-automated: the user opens an
+unsaved schedule form and selects participants, then the Worker reads participant
+and company-wide facility availability, calculates one-hour candidates, and
+discards the form. It never selects the final Add control.
 
 ## Run locally
 
@@ -51,7 +58,7 @@ npm run build
 Start the Agent API in one terminal:
 
 ```bash
-npm run dev:api
+ALLOWED_DOMAINS=your-desknets.example npm run dev:api
 ```
 
 Start the Web Console in another terminal:
@@ -61,5 +68,24 @@ npm run dev:web
 ```
 
 Then open `http://127.0.0.1:3000`.
+
+Create or refresh the local DeskNet's Microsoft Edge session with a manual login:
+
+```bash
+npm run auth:desknets -- https://your-desknets.example/path
+```
+
+The helper starts normal Edge with a loopback-only DevTools port; Playwright
+connects after Edge is running instead of launching it with a debugging pipe.
+The dedicated browser profile is retained under the Git-ignored `.auth/`
+directory. Never pass an ID or password on the command line or store credentials
+in the project.
+
+For a DeskNet's run, keep exactly one approved DeskNet's tab open. Open an
+unsaved schedule form, open `登録先`, select at least two participants so they
+appear in the lower availability grid, and leave that dialog open. Select
+`DeskNet's（準備済みフォーム）` in the Web Console and start the read-only run.
+The Worker checks all company-wide facilities, captures evidence, and cancels
+the unsaved form even when the run fails.
 
 See `HANDOFF.md` for the broader design and implementation plan.

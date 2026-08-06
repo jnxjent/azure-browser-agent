@@ -8,6 +8,11 @@ export interface ParticipantSchedule {
   busy: TimeInterval[];
 }
 
+export interface FacilitySchedule {
+  facilityId: string;
+  busy: TimeInterval[];
+}
+
 export interface CommonAvailabilityRequest {
   window: TimeInterval;
   durationMinutes: number;
@@ -18,6 +23,14 @@ export interface CommonAvailabilityRequest {
 export interface CommonAvailabilitySlot extends TimeInterval {
   participantIds: string[];
   durationMinutes: number;
+}
+
+export interface BookableAvailabilityRequest extends CommonAvailabilityRequest {
+  facilities: FacilitySchedule[];
+}
+
+export interface BookableAvailabilitySlot extends CommonAvailabilitySlot {
+  availableFacilityIds: string[];
 }
 
 interface NumericInterval {
@@ -100,6 +113,43 @@ export function findCommonAvailability(
   return slots;
 }
 
+export function findBookableAvailability(
+  request: BookableAvailabilityRequest,
+): BookableAvailabilitySlot[] {
+  if (request.facilities.length === 0) {
+    throw new TypeError("At least one facility schedule is required.");
+  }
+
+  const facilityIds = request.facilities.map((facility) =>
+    readIdentifier(facility.facilityId, "facilityId"),
+  );
+  if (new Set(facilityIds).size !== facilityIds.length) {
+    throw new TypeError("facilityId values must be unique.");
+  }
+
+  const facilities = request.facilities.map((facility) => ({
+    facilityId: readIdentifier(facility.facilityId, "facilityId"),
+    busy: facility.busy.map((interval, index) =>
+      parseInterval(interval, `${facility.facilityId}.busy[${index}]`),
+    ),
+  }));
+
+  return findCommonAvailability(request).flatMap((slot) => {
+    const candidate = parseInterval(slot, "candidate slot");
+    const availableFacilityIds = facilities
+      .filter((facility) =>
+        facility.busy.every(
+          (busy) => busy.start >= candidate.end || busy.end <= candidate.start,
+        ),
+      )
+      .map((facility) => facility.facilityId);
+
+    return availableFacilityIds.length === 0
+      ? []
+      : [{ ...slot, availableFacilityIds }];
+  });
+}
+
 function parseInterval(interval: TimeInterval, label: string): NumericInterval {
   const start = Date.parse(interval.start);
   const end = Date.parse(interval.end);
@@ -117,6 +167,14 @@ function readPositiveInteger(value: number, label: string): number {
     throw new TypeError(`${label} must be a positive integer.`);
   }
   return value;
+}
+
+function readIdentifier(value: string, label: string): string {
+  const identifier = value.trim();
+  if (identifier === "") {
+    throw new TypeError(`${label} must be a non-empty string.`);
+  }
+  return identifier;
 }
 
 function mergeIntervals(intervals: NumericInterval[]): NumericInterval[] {

@@ -22,8 +22,10 @@
       .grid { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 20px; }
       .card { border: 1px solid #243a55; border-radius: 18px; padding: 22px; background: rgba(10, 25, 43, 0.84); box-shadow: 0 18px 70px rgba(0,0,0,.2); }
       label { display: block; margin-bottom: 8px; color: #c8d5e5; font-size: 14px; }
-      textarea { width: 100%; min-height: 130px; resize: vertical; border: 1px solid #315071; border-radius: 12px; padding: 14px; background: #081421; color: inherit; font: inherit; }
-      textarea:focus { outline: 2px solid #42a5f5; border-color: transparent; }
+      textarea, select { width: 100%; border: 1px solid #315071; border-radius: 12px; padding: 14px; background: #081421; color: inherit; font: inherit; }
+      textarea { min-height: 130px; resize: vertical; }
+      textarea:focus, select:focus { outline: 2px solid #42a5f5; border-color: transparent; }
+      select { margin-bottom: 14px; }
       button { margin-top: 14px; width: 100%; border: 0; border-radius: 12px; padding: 13px 18px; background: #3da2ff; color: #04111f; font-weight: 800; cursor: pointer; }
       button:disabled { cursor: wait; opacity: .55; }
       .status { display: flex; align-items: center; gap: 10px; min-height: 32px; }
@@ -54,17 +56,22 @@
           <h1>Azure Browser Agent</h1>
           <p>認識・判断・操作・検証を、ひとつのRunとして追跡します。</p>
         </div>
-        <div class="badge">Mock site · safe mode</div>
+        <div id="mode-badge" class="badge">Read-only · safe mode</div>
       </header>
       <div class="grid">
         <section class="card">
           <h2>新しいRun</h2>
           <form id="run-form">
+            <label for="site">対象サイト</label>
+            <select id="site">
+              <option value="mock">Mock site</option>
+              <option value="desknets">DeskNet's（準備済みフォーム）</option>
+            </select>
             <label for="prompt">Agentへの指示</label>
             <textarea id="prompt" required>Aさん、Bさん、Cさんの空き時間を調べて</textarea>
             <button id="submit" type="submit">読み取り専用で実行</button>
           </form>
-          <p class="muted">この段階では実サイトを操作せず、モック画面への1操作だけを実行します。</p>
+          <p id="site-note" class="muted">Mock画面から共通空き時間を計算します。</p>
         </section>
         <section class="card">
           <h2>Run details</h2>
@@ -75,9 +82,14 @@
     <script>
       const apiBase = "http://127.0.0.1:3001";
       const form = document.querySelector("#run-form");
+      const siteInput = document.querySelector("#site");
       const promptInput = document.querySelector("#prompt");
       const submit = document.querySelector("#submit");
       const output = document.querySelector("#output");
+      const siteNote = document.querySelector("#site-note");
+
+      siteInput.addEventListener("change", renderSiteNote);
+      renderSiteNote();
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -88,7 +100,7 @@
           const response = await fetch(`${apiBase}/browser-agent/runs`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ site: "mock", mode: "read", prompt: promptInput.value }),
+            body: JSON.stringify({ site: siteInput.value, mode: "read", prompt: promptInput.value }),
           });
           const run = await response.json();
           if (!response.ok) throw new Error(run.error ?? "Runの作成に失敗しました。");
@@ -102,7 +114,7 @@
       });
 
       async function poll(runId) {
-        for (let attempt = 0; attempt < 30; attempt += 1) {
+        for (let attempt = 0; attempt < 120; attempt += 1) {
           const response = await fetch(`${apiBase}/browser-agent/runs/${runId}`);
           const run = await response.json();
           if (!response.ok) throw new Error(run.error ?? "Runの取得に失敗しました。");
@@ -128,6 +140,14 @@
               element("div", "", formatSlot(slot)),
               element("div", "muted", `参加者: ${slot.participantIds.join(", ")}`),
             );
+            if (slot.availableFacilityIds?.length) {
+              const shownFacilities = slot.availableFacilityIds.slice(0, 5);
+              const remaining = slot.availableFacilityIds.length - shownFacilities.length;
+              const suffix = remaining > 0 ? `（ほか${remaining}件）` : "";
+              candidate.append(
+                element("div", "muted", `空き設備: ${shownFacilities.join(", ")}${suffix}`),
+              );
+            }
             output.append(candidate);
           }
         }
@@ -159,6 +179,12 @@
 
       function renderError(error) {
         output.replaceChildren(element("div", "status", error instanceof Error ? error.message : String(error)));
+      }
+
+      function renderSiteNote() {
+        siteNote.textContent = siteInput.value === "desknets"
+          ? "認証済みEdgeで未保存フォームを開き、登録先ダイアログに参加者を選択した状態から読み取ります。予定は登録しません。"
+          : "Mock画面から共通空き時間を計算します。";
       }
 
       function element(tag, className, text) {

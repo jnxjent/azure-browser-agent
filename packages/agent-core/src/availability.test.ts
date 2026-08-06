@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { findCommonAvailability } from "./availability.js";
+import {
+  findBookableAvailability,
+  findCommonAvailability,
+} from "./availability.js";
 
 describe("findCommonAvailability", () => {
   it("returns only slots where every participant is free", () => {
@@ -137,6 +140,118 @@ describe("findCommonAvailability", () => {
           schedules: [
             { participantId: "A", busy: [] },
             { participantId: "A", busy: [] },
+          ],
+        }),
+      /must be unique/,
+    );
+  });
+});
+
+describe("findBookableAvailability", () => {
+  it("returns participant slots only when at least one facility is also free", () => {
+    const slots = findBookableAvailability({
+      window: {
+        start: "2026-08-07T13:00:00+09:00",
+        end: "2026-08-07T16:00:00+09:00",
+      },
+      durationMinutes: 60,
+      schedules: [
+        {
+          participantId: "A",
+          busy: [
+            {
+              start: "2026-08-07T13:00:00+09:00",
+              end: "2026-08-07T14:00:00+09:00",
+            },
+          ],
+        },
+        { participantId: "B", busy: [] },
+      ],
+      facilities: [
+        {
+          facilityId: "Room 1",
+          busy: [
+            {
+              start: "2026-08-07T14:00:00+09:00",
+              end: "2026-08-07T15:00:00+09:00",
+            },
+          ],
+        },
+        {
+          facilityId: "Room 2",
+          busy: [
+            {
+              start: "2026-08-07T15:00:00+09:00",
+              end: "2026-08-07T16:00:00+09:00",
+            },
+          ],
+        },
+      ],
+    });
+
+    assert.deepEqual(
+      slots.map((slot) => ({
+        start: slot.start,
+        availableFacilityIds: slot.availableFacilityIds,
+      })),
+      [
+        {
+          start: "2026-08-07T05:00:00.000Z",
+          availableFacilityIds: ["Room 2"],
+        },
+        {
+          start: "2026-08-07T06:00:00.000Z",
+          availableFacilityIds: ["Room 1"],
+        },
+      ],
+    );
+  });
+
+  it("omits a participant slot when every facility is occupied", () => {
+    const slots = findBookableAvailability({
+      window: {
+        start: "2026-08-07T14:00:00+09:00",
+        end: "2026-08-07T15:00:00+09:00",
+      },
+      durationMinutes: 60,
+      schedules: [{ participantId: "A", busy: [] }],
+      facilities: [
+        {
+          facilityId: "Room 1",
+          busy: [
+            {
+              start: "2026-08-07T14:00:00+09:00",
+              end: "2026-08-07T15:00:00+09:00",
+            },
+          ],
+        },
+      ],
+    });
+
+    assert.deepEqual(slots, []);
+  });
+
+  it("rejects missing and duplicate facility identifiers", () => {
+    const request = {
+      window: {
+        start: "2026-08-07T14:00:00+09:00",
+        end: "2026-08-07T15:00:00+09:00",
+      },
+      durationMinutes: 60,
+      schedules: [{ participantId: "A", busy: [] }],
+    };
+
+    assert.throws(
+      () => findBookableAvailability({ ...request, facilities: [] }),
+      /At least one facility/,
+    );
+    assert.throws(
+      () =>
+        findBookableAvailability({
+          ...request,
+          facilities: [
+            { facilityId: "Room 1", busy: [] },
+            { facilityId: "Room 1", busy: [] },
           ],
         }),
       /must be unique/,

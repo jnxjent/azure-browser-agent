@@ -18,6 +18,12 @@ The mock worker uses headless Chromium to prove one bounded loop:
 5. capture a second PNG observation
 6. verify the expected screen evidence
 
+The DeskNet's read-only path will inspect both participant and facility availability
+from an unsaved schedule form. Candidate times are retained only when every
+participant is free and at least one requested facility is free. The final Add
+control is a write boundary and remains prohibited until an explicit approval flow
+is implemented.
+
 The PNG files are written under the ignored `screenshots/` directory and are only exposed through a run-scoped API route with fixed artifact names.
 
 No Azure OpenAI request or DeskNet's access occurs in this milestone.

@@ -55,7 +55,7 @@ export interface BrowserRun {
   result?: {
     summary: string;
     evidence: string[];
-    availability?: CommonAvailabilitySlot[];
+    availability?: Array<CommonAvailabilitySlot | BookableAvailabilitySlot>;
   };
   error?: string;
 }
@@ -69,4 +69,7 @@ export interface RunLimits {
 export interface RunExecutor {
   execute(run: BrowserRun, signal: AbortSignal): Promise<BrowserRun>;
 }
-import type { CommonAvailabilitySlot } from "./availability.js";
+import type {
+  BookableAvailabilitySlot,
+  CommonAvailabilitySlot,
+} from "./availability.js";

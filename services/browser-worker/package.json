@@ -11,6 +11,8 @@
   "scripts": {
     "build": "tsc --build",
     "check": "tsc --build --pretty false",
+    "auth:desknets": "node --enable-source-maps dist/desknets-session.js",
+    "test": "node --test dist/desknets-timeline.test.js",
     "clean": "tsc --build --clean"
   },
   "keywords": [],
