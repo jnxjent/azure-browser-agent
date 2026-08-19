@@ -5,9 +5,12 @@ export class PolicyViolationError extends Error {
 }
 
 export function assertRunAllowed(run: BrowserRun, limits: RunLimits): void {
-  if (run.input.mode !== "read") {
+  if (
+    run.input.mode === "write" &&
+    (run.task?.type !== "book_meeting" || run.context === undefined)
+  ) {
     throw new PolicyViolationError(
-      "The initial PoC only permits read-only runs.",
+      "Write runs require an explicit booking instruction and pending availability context.",
     );
   }
 
@@ -19,15 +22,18 @@ export function assertRunAllowed(run: BrowserRun, limits: RunLimits): void {
 export function assertActionAllowed(
   action: BrowserAction,
   limits: RunLimits,
+  mode: "read" | "write" = "read",
+  explicitlyApproved = false,
 ): void {
   if (
     action.type === "click" &&
     ["追加", "登録", "保存", "送信", "削除", "submit"].includes(
       action.target.trim().toLowerCase(),
-    )
+    ) &&
+    (mode !== "write" || !explicitlyApproved)
   ) {
     throw new PolicyViolationError(
-      `Read-only policy prohibits the final action: ${action.target}`,
+      `Explicit final approval is required for action: ${action.target}`,
     );
   }
 

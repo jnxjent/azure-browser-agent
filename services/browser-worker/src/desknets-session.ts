@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, mkdir } from "node:fs/promises";
+import { access, mkdir, unlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { resolve } from "node:path";
@@ -25,6 +25,7 @@ const startUrl = readStartUrl(urlArgument);
 const port = readPort(process.env.DESKNETS_CDP_PORT, 9222);
 const projectDirectory = resolve(import.meta.dirname, "../../..");
 const profileDirectory = resolve(projectDirectory, ".auth", "desknets-edge-cdp-profile");
+const processIdFile = resolve(projectDirectory, ".auth", "desknets-edge.pid");
 const edgeExecutable =
   process.env.EDGE_EXECUTABLE_PATH ??
   "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
@@ -59,9 +60,20 @@ if (startup.kind === "exit") {
   );
 }
 
+const edgeProcessId = edge.pid;
+if (edgeProcessId === undefined) {
+  throw new Error("Could not determine the dedicated Edge process ID.");
+}
+await writeFile(processIdFile, `${edgeProcessId}\n`, "utf8");
+const nativeSignInClicked = await clickNativeEdgeSignIn(edgeProcessId);
+if (nativeSignInClicked) {
+  console.log("Clicked the dedicated Edge native sign-in prompt.");
+}
+
 console.log(`DeskNet's Edge session is ready at http://127.0.0.1:${port}.`);
 console.log("Log in manually and leave this Edge window open while the PoC is running.");
 const result = await exited;
+await unlink(processIdFile).catch(() => undefined);
 if (result.code !== 0 && result.code !== null) {
   process.exitCode = result.code;
 }
@@ -79,6 +91,90 @@ async function waitForDevTools(portNumber: number): Promise<void> {
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
   throw new Error(`Edge DevTools endpoint did not become ready: ${endpoint}`);
+}
+
+async function clickNativeEdgeSignIn(processId: number): Promise<boolean> {
+  const script = `
+Add-Type -AssemblyName UIAutomationClient
+$targetProcessId = [int]$env:DESKNETS_EDGE_PROCESS_ID
+$deadline = [DateTime]::UtcNow.AddSeconds(8)
+$nameCondition = New-Object System.Windows.Automation.PropertyCondition(
+  [System.Windows.Automation.AutomationElement]::NameProperty,
+  'サインイン'
+)
+
+while ([DateTime]::UtcNow -lt $deadline) {
+  $candidates = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    $nameCondition
+  )
+  foreach ($candidate in $candidates) {
+    try {
+      if (
+        $candidate.Current.ProcessId -eq $targetProcessId -and
+        $candidate.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button
+      ) {
+        $invoke = $candidate.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+        $invoke.Invoke()
+        Write-Output 'clicked'
+        exit 0
+      }
+    } catch {
+      # The native dialog may close while UI Automation is inspecting it.
+    }
+  }
+  Start-Sleep -Milliseconds 250
+}
+
+Write-Output 'not_found'
+exit 2
+`;
+  const encodedScript = Buffer.from(script, "utf16le").toString("base64");
+  const powershell = spawn(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript],
+    {
+      env: {
+        ...process.env,
+        DESKNETS_EDGE_PROCESS_ID: String(processId),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+
+  let stdout = "";
+  let stderr = "";
+  powershell.stdout.setEncoding("utf8");
+  powershell.stderr.setEncoding("utf8");
+  powershell.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  powershell.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+
+  const result = await Promise.race([
+    once(powershell, "exit").then(([code, signal]) => ({
+      kind: "exit" as const,
+      code: typeof code === "number" ? code : null,
+      signal: typeof signal === "string" ? signal : null,
+    })),
+    once(powershell, "error").then(([error]) => ({
+      kind: "error" as const,
+      error: error as Error,
+    })),
+  ]);
+  if (result.kind === "error") {
+    throw new Error("Could not inspect the dedicated Edge sign-in prompt.", {
+      cause: result.error,
+    });
+  }
+  if (result.code === 0 && stdout.includes("clicked")) return true;
+  if (result.code === 2 && stdout.includes("not_found")) return false;
+  throw new Error(
+    `Native Edge sign-in helper failed (code=${result.code}, signal=${result.signal}): ${stderr.trim()}`,
+  );
 }
 
 function readStartUrl(value: string): URL {

@@ -40,6 +40,21 @@ interface NumericInterval {
 
 const MINUTE_MS = 60_000;
 
+export function filterFutureAvailability<T extends TimeInterval>(
+  slots: T[],
+  now: Date = new Date(),
+): T[] {
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) throw new TypeError("now must be a valid date.");
+  return slots.filter((slot) => {
+    const start = Date.parse(slot.start);
+    if (!Number.isFinite(start)) {
+      throw new TypeError("availability slot must contain a valid start date-time.");
+    }
+    return start >= nowMs;
+  });
+}
+
 export function findCommonAvailability(
   request: CommonAvailabilityRequest,
 ): CommonAvailabilitySlot[] {

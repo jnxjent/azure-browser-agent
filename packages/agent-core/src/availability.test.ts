@@ -1,9 +1,30 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  filterFutureAvailability,
   findBookableAvailability,
   findCommonAvailability,
 } from "./availability.js";
+
+describe("filterFutureAvailability", () => {
+  it("omits past dates and already-started same-day slots", () => {
+    const slots = [
+      { start: "2026-08-05T17:00:00+09:00", end: "2026-08-05T18:00:00+09:00" },
+      { start: "2026-08-06T16:00:00+09:00", end: "2026-08-06T17:00:00+09:00" },
+      { start: "2026-08-06T16:30:00+09:00", end: "2026-08-06T17:30:00+09:00" },
+      { start: "2026-08-07T08:00:00+09:00", end: "2026-08-07T09:00:00+09:00" },
+    ];
+
+    assert.deepEqual(
+      filterFutureAvailability(slots, new Date("2026-08-06T16:09:00+09:00")),
+      slots.slice(2),
+    );
+  });
+
+  it("rejects an invalid current time", () => {
+    assert.throws(() => filterFutureAvailability([], new Date("invalid")), /valid date/);
+  });
+});
 
 describe("findCommonAvailability", () => {
   it("returns only slots where every participant is free", () => {

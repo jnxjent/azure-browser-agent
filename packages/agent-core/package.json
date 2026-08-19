@@ -12,7 +12,7 @@
     "build": "tsc --build",
     "check": "tsc --build --pretty false",
     "clean": "tsc --build --clean",
-    "test": "node --test dist/availability.test.js dist/policy.test.js"
+    "test": "node --test dist/availability.test.js dist/desknets-intent.test.js dist/intent-analyzer.test.js dist/policy.test.js"
   },
   "keywords": [],
   "author": "",

@@ -31,6 +31,8 @@
       .status { display: flex; align-items: center; gap: 10px; min-height: 32px; }
       .dot { width: 10px; height: 10px; border-radius: 50%; background: #60758e; }
       .dot.running { background: #ffd166; box-shadow: 0 0 14px #ffd166; }
+      .dot.awaiting_approval { background: #ffad42; box-shadow: 0 0 14px #ffad42; }
+      .dot.awaiting_user_input { background: #70b8ff; box-shadow: 0 0 14px #70b8ff; }
       .dot.completed { background: #65df9b; box-shadow: 0 0 14px #65df9b; }
       .dot.failed { background: #ff7085; }
       .timeline { display: grid; gap: 12px; margin-top: 18px; }
@@ -45,6 +47,31 @@
       .empty { padding: 48px 12px; text-align: center; color: #71859e; }
       .candidate { margin-top: 14px; padding: 14px; border: 1px solid #277a65; border-radius: 11px; background: rgba(31, 137, 103, .12); }
       .candidate strong { color: #65dfb1; }
+      .availability-days { display: grid; gap: 10px; margin-top: 14px; }
+      .availability-day { border: 1px solid #277a65; border-radius: 11px; background: rgba(31, 137, 103, .08); overflow: hidden; }
+      .availability-day summary { padding: 13px 14px; cursor: pointer; color: #65dfb1; font-weight: 800; }
+      .availability-day[open] summary { border-bottom: 1px solid #245e50; }
+      .availability-table-wrap { padding: 8px 10px 12px; }
+      .availability-table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+      .availability-table th, .availability-table td { padding: 9px 6px; border-bottom: 1px solid #245e50; text-align: left; vertical-align: middle; overflow-wrap: anywhere; }
+      .availability-table th { color: #8396ad; font-size: 12px; }
+      .availability-table th:nth-child(1) { width: 82px; }
+      .availability-table th:nth-child(3) { width: 112px; }
+      .availability-table th:nth-child(4) { width: 88px; }
+      .availability-table tr:last-child td { border-bottom: 0; }
+      .facility-select { width: 100%; min-width: 0; margin: 0; padding: 8px 6px; font-size: 12px; }
+      .email-options { display: grid; gap: 5px; }
+      .email-options label { display: inline-flex; align-items: center; gap: 5px; margin: 0; color: #c8d5e5; font-size: 13px; cursor: pointer; }
+      .slot-select { width: 100%; min-width: 0; margin: 0; padding: 9px 6px; font-size: 12px; }
+      .conversation { display: grid; gap: 10px; margin: 0 0 18px; max-height: 320px; overflow: auto; }
+      .message { padding: 11px 13px; border-radius: 12px; line-height: 1.6; white-space: pre-wrap; }
+      .message.user { margin-left: 28px; background: #15385d; }
+      .message.assistant { margin-right: 28px; background: #102b25; border: 1px solid #245e50; }
+      .approval { margin-top: 16px; padding: 16px; border: 2px solid #d88728; border-radius: 12px; background: rgba(216, 135, 40, .12); }
+      .approval strong { color: #ffc46b; }
+      .approval button { background: #ffad42; }
+      .choice-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      .choice-row button:last-child { background: #8fa4ba; }
       @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } header { align-items: start; flex-direction: column; } }
     </style>
   </head>
@@ -52,24 +79,25 @@
     <main>
       <header>
         <div>
-          <div class="muted">READ-ONLY POC</div>
+          <div class="muted">CONVERSATIONAL POC</div>
           <h1>Azure Browser Agent</h1>
           <p>認識・判断・操作・検証を、ひとつのRunとして追跡します。</p>
         </div>
-        <div id="mode-badge" class="badge">Read-only · safe mode</div>
+        <div id="mode-badge" class="badge">Read + explicit booking</div>
       </header>
       <div class="grid">
         <section class="card">
           <h2>新しいRun</h2>
+          <div id="conversation" class="conversation"></div>
           <form id="run-form">
             <label for="site">対象サイト</label>
             <select id="site">
+              <option value="desknets">DeskNet's</option>
               <option value="mock">Mock site</option>
-              <option value="desknets">DeskNet's（準備済みフォーム）</option>
             </select>
             <label for="prompt">Agentへの指示</label>
-            <textarea id="prompt" required>Aさん、Bさん、Cさんの空き時間を調べて</textarea>
-            <button id="submit" type="submit">読み取り専用で実行</button>
+            <textarea id="prompt" required placeholder="例：テスト可能な参加者名と本日以降の日付を指定してください"></textarea>
+            <button id="submit" type="submit">送信</button>
           </form>
           <p id="site-note" class="muted">Mock画面から共通空き時間を計算します。</p>
         </section>
@@ -87,12 +115,21 @@
       const submit = document.querySelector("#submit");
       const output = document.querySelector("#output");
       const siteNote = document.querySelector("#site-note");
+      const conversation = document.querySelector("#conversation");
+      const modeBadge = document.querySelector("#mode-badge");
+      const threadId = crypto.randomUUID();
+      const renderedAssistantStates = new Set();
 
       siteInput.addEventListener("change", renderSiteNote);
       renderSiteNote();
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
+        await submitPrompt(promptInput.value.trim());
+      });
+
+      async function submitPrompt(prompt) {
+        appendMessage("user", prompt);
         submit.disabled = true;
         output.className = "";
         output.textContent = "Runを作成しています…";
@@ -100,26 +137,39 @@
           const response = await fetch(`${apiBase}/browser-agent/runs`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ site: siteInput.value, mode: "read", prompt: promptInput.value }),
+            body: JSON.stringify({
+              site: siteInput.value,
+              mode: "read",
+              prompt,
+              threadId,
+            }),
           });
           const run = await response.json();
           if (!response.ok) throw new Error(run.error ?? "Runの作成に失敗しました。");
           render(run);
           await poll(run.id);
+          promptInput.value = "";
         } catch (error) {
           renderError(error);
         } finally {
           submit.disabled = false;
         }
-      });
+      }
 
       async function poll(runId) {
-        for (let attempt = 0; attempt < 120; attempt += 1) {
+        for (let attempt = 0; attempt < 2400; attempt += 1) {
           const response = await fetch(`${apiBase}/browser-agent/runs/${runId}`);
           const run = await response.json();
           if (!response.ok) throw new Error(run.error ?? "Runの取得に失敗しました。");
           render(run);
-          if (["completed", "failed", "cancelled"].includes(run.status)) return;
+          if (["awaiting_user_input", "awaiting_approval", "completed", "failed", "cancelled"].includes(run.status)) {
+            const assistantState = `${run.id}:${run.status}`;
+            if (["awaiting_user_input", "awaiting_approval", "completed"].includes(run.status) && !renderedAssistantStates.has(assistantState)) {
+              appendMessage("assistant", run.result?.assistantMessage ?? run.result?.summary ?? "完了しました。");
+              renderedAssistantStates.add(assistantState);
+            }
+            return;
+          }
           await new Promise((resolve) => setTimeout(resolve, 250));
         }
         throw new Error("Runの完了待ちがタイムアウトしました。");
@@ -129,26 +179,41 @@
         output.replaceChildren();
         const status = element("div", "status");
         status.append(element("span", `dot ${run.status}`), element("strong", "", run.status));
-        output.append(status, element("div", "muted", `Run ID: ${run.id}`));
+        output.append(
+          status,
+          element("div", "muted", `Run ID: ${run.id}`),
+          run.intentSource
+            ? element("div", "muted", `Intent解析: ${run.intentSource === "azure_openai" ? "Azure OpenAI" : "決定的フォールバック"}`)
+            : element("span", ""),
+        );
+        modeBadge.textContent = run.result?.manualActionRequest
+          ? "DeskNet'sで追加待ち（未登録）"
+          : run.input.mode === "write"
+          ? run.status === "awaiting_approval" ? "最終確認待ち（未登録）" : "Booking workflow"
+          : run.status === "awaiting_user_input" ? "ミーティング内容の確認待ち" : "Read-only availability check";
 
         if (run.result) {
-          output.append(element("p", "", run.result.summary));
-          for (const slot of run.result.availability ?? []) {
-            const candidate = element("div", "candidate");
-            candidate.append(
-              element("strong", "", "共通の空き時間"),
-              element("div", "", formatSlot(slot)),
-              element("div", "muted", `参加者: ${slot.participantIds.join(", ")}`),
-            );
-            if (slot.availableFacilityIds?.length) {
-              const shownFacilities = slot.availableFacilityIds.slice(0, 5);
-              const remaining = slot.availableFacilityIds.length - shownFacilities.length;
-              const suffix = remaining > 0 ? `（ほか${remaining}件）` : "";
-              candidate.append(
-                element("div", "muted", `空き設備: ${shownFacilities.join(", ")}${suffix}`),
-              );
-            }
-            output.append(candidate);
+          output.append(element("p", "", run.result.assistantMessage ?? run.result.summary));
+          if (run.task?.type === "find_availability") {
+            output.append(renderActionableAvailabilityByDate(
+              run.result.availability ?? [],
+              run.task.durationMinutes,
+              run.task.date,
+              run.task.endDate,
+            ));
+          }
+          if (run.task?.type === "find_facility_availability") {
+            const slots = (run.result.availability ?? []).slice(0, 50);
+            output.append(renderActionableAvailabilityByDate(
+              slots,
+              slots[0]?.durationMinutes ?? 60,
+            ));
+          }
+          if (run.status === "awaiting_user_input" && run.result.meetingProposal) {
+            output.append(renderMeetingProposal(run.result.meetingProposal));
+          }
+          if (run.status === "awaiting_user_input" && run.result.manualActionRequest) {
+            output.append(renderManualHandoff(run.result.manualActionRequest));
           }
         }
 
@@ -177,14 +242,164 @@
         if (run.error) output.append(element("p", "", run.error));
       }
 
+      function renderMeetingProposal(proposal) {
+        const panel = element("div", "approval");
+        panel.append(
+          element("strong", "", "ミーティング内容の確認"),
+          element("p", "", `日時: ${formatSlot(proposal)}\n参加者: ${proposal.participantIds.join("、")}\n会議室: ${proposal.facilityId}\n\n出席者（本人を含む）へメールを送信しますか？`),
+        );
+        const choices = element("div", "choice-row");
+        const withEmail = element("button", "", "はい、メール送信する");
+        withEmail.type = "button";
+        withEmail.addEventListener("click", () => submitPrompt("はい"));
+        const withoutEmail = element("button", "", "いいえ、送信しない");
+        withoutEmail.type = "button";
+        withoutEmail.addEventListener("click", () => submitPrompt("いいえ"));
+        choices.append(withEmail, withoutEmail);
+        panel.append(choices);
+        return panel;
+      }
+
+      function renderActionableAvailabilityByDate(slots, durationMinutes, startDate, endDate) {
+        const container = element("div", "availability-days");
+        const grouped = new Map();
+        if (startDate && endDate) {
+          const cursor = new Date(`${startDate}T00:00:00Z`);
+          const last = Date.parse(`${endDate}T00:00:00Z`);
+          while (cursor.getTime() <= last) {
+            grouped.set(cursor.toISOString().slice(0, 10), []);
+            cursor.setUTCDate(cursor.getUTCDate() + 1);
+          }
+        }
+        for (const slot of slots) {
+          const dateKey = japanDateKey(slot.start);
+          if (!grouped.has(dateKey)) grouped.set(dateKey, []);
+          grouped.get(dateKey).push(slot);
+        }
+        if (grouped.size === 0) {
+          container.append(element("div", "muted", "指定期間内に候補はありません。"));
+          return container;
+        }
+        const collapseDays = slots.length > 10;
+        for (const [dateKey, daySlots] of grouped) {
+          const details = element("details", "availability-day");
+          details.open = !collapseDays;
+          const summary = element(
+            "summary",
+            "",
+            `${formatJapanDate(dateKey)}（${daySlots.length === 0 ? "候補なし" : `${daySlots.length}枠・${durationMinutes}分`}）`,
+          );
+          const tableWrap = element("div", "availability-table-wrap");
+          if (daySlots.length === 0) {
+            tableWrap.append(element("div", "muted", "この日の候補はありません。"));
+          } else {
+            tableWrap.append(renderAvailabilityTable(daySlots, dateKey));
+          }
+          details.append(summary, tableWrap);
+          container.append(details);
+        }
+        return container;
+      }
+
+      function renderAvailabilityTable(slots, dateKey) {
+        const table = element("table", "availability-table");
+        const head = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        for (const label of ["時間", "空き会議室", "メール", ""]) {
+          headRow.append(element("th", "", label));
+        }
+        head.append(headRow);
+        const body = document.createElement("tbody");
+        slots.forEach((slot, index) => {
+          const row = document.createElement("tr");
+          const timeCell = document.createElement("td");
+          timeCell.textContent = formatSlotTime(slot);
+
+          const facilityCell = document.createElement("td");
+          const facilitySelect = element("select", "facility-select");
+          for (const facility of slot.availableFacilityIds ?? []) {
+            const option = document.createElement("option");
+            option.value = facility;
+            option.textContent = facility;
+            facilitySelect.append(option);
+          }
+          const preferredFacility = Array.from(facilitySelect.options).find((option) =>
+            option.value.normalize("NFKC").replace(/\s+/g, "").toUpperCase().includes("ミーティングルームC")
+          );
+          if (preferredFacility) facilitySelect.value = preferredFacility.value;
+          facilityCell.append(facilitySelect);
+
+          const emailCell = document.createElement("td");
+          const emailOptions = element("div", "email-options");
+          const radioName = `email-${dateKey}-${index}-${crypto.randomUUID()}`;
+          const sendEmail = radioChoice(radioName, "send", "送信する", true);
+          const noEmail = radioChoice(radioName, "none", "送信しない", false);
+          emailOptions.append(sendEmail.label, noEmail.label);
+          emailCell.append(emailOptions);
+
+          const actionCell = document.createElement("td");
+          const choose = element("button", "slot-select", "選択する");
+          choose.type = "button";
+          choose.disabled = facilitySelect.options.length === 0;
+          choose.addEventListener("click", async () => {
+            const facility = facilitySelect.value;
+            if (!facility) return;
+            choose.disabled = true;
+            const prompt = directBookingPrompt(slot, facility, sendEmail.input.checked);
+            await submitPrompt(prompt);
+          });
+          actionCell.append(choose);
+          row.append(timeCell, facilityCell, emailCell, actionCell);
+          body.append(row);
+        });
+        table.append(head, body);
+        return table;
+      }
+
+      function radioChoice(name, value, text, checked) {
+        const label = document.createElement("label");
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = name;
+        input.value = value;
+        input.checked = checked;
+        label.append(input, document.createTextNode(text));
+        return { label, input };
+      }
+
+      function directBookingPrompt(slot, facility, sendEmail) {
+        const start = new Date(slot.start);
+        const date = new Intl.DateTimeFormat("ja-JP", {
+          timeZone: "Asia/Tokyo",
+          month: "numeric",
+          day: "numeric",
+        }).format(start);
+        const emailInstruction = sendEmail ? "メール送信して" : "メール送信しないで";
+        return `それでは${date}の${formatSlotTime(slot)}、設備「${facility}」で打ち合わせを設定して。${emailInstruction}`;
+      }
+
       function renderError(error) {
         output.replaceChildren(element("div", "status", error instanceof Error ? error.message : String(error)));
       }
 
+      function renderManualHandoff(request) {
+        const panel = element("div", "approval");
+        panel.append(
+          element("strong", "", "DeskNet'sで内容確認・手動追加待ち"),
+          element("p", "", `議題: ${request.title || "未入力（DeskNet'sで入力してください）"}\n日時: ${formatSlot(request)}\n参加者: ${request.participantIds.join("、")}\n設備: ${request.facilityId}\nメール: ${request.emailNotificationWillBeSent ? "送信する" : "送信しない"}\n自分には通知しない: オフ\n\n専用Edgeに入力済みの予約画面を表示しています。内容を確認し、DeskNet's上の「追加」を押してください。Agentは追加を押しません。`),
+        );
+        return panel;
+      }
+
       function renderSiteNote() {
         siteNote.textContent = siteInput.value === "desknets"
-          ? "認証済みEdgeで未保存フォームを開き、登録先ダイアログに参加者を選択した状態から読み取ります。予定は登録しません。"
+          ? "候補を選ぶとDeskNet'sの予約画面へ日時・参加者・設備・メール設定を入力します。議題と内容を確認し、最後の「追加」はDeskNet's上でユーザーが押します。Agentは追加を押しません。"
           : "Mock画面から共通空き時間を計算します。";
+      }
+
+      function appendMessage(role, text) {
+        conversation.append(element("div", `message ${role}`, text));
+        conversation.scrollTop = conversation.scrollHeight;
       }
 
       function element(tag, className, text) {
@@ -212,6 +427,36 @@
           minute: "2-digit",
         });
         return `${formatter.format(new Date(slot.start))} ～ ${formatter.format(new Date(slot.end))}`;
+      }
+
+      function japanDateKey(value) {
+        const parts = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Asia/Tokyo",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).formatToParts(new Date(value));
+        const read = (type) => parts.find((part) => part.type === type)?.value;
+        return `${read("year")}-${read("month")}-${read("day")}`;
+      }
+
+      function formatJapanDate(dateKey) {
+        return new Intl.DateTimeFormat("ja-JP", {
+          timeZone: "Asia/Tokyo",
+          month: "long",
+          day: "numeric",
+          weekday: "short",
+        }).format(new Date(`${dateKey}T00:00:00+09:00`));
+      }
+
+      function formatSlotTime(slot) {
+        const formatter = new Intl.DateTimeFormat("ja-JP", {
+          timeZone: "Asia/Tokyo",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        });
+        return `${formatter.format(new Date(slot.start))}〜${formatter.format(new Date(slot.end))}`;
       }
     </script>
   </body>
