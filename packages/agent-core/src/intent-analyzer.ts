@@ -1,5 +1,5 @@
 import type { DeskNetsTask } from "./contracts.js";
-import { parseDeskNetsTask } from "./desknets-intent.js";
+import { normalizeParticipantName, parseDeskNetsTask } from "./desknets-intent.js";
 
 export interface IntentAnalysis {
   task: DeskNetsTask;
@@ -17,9 +17,14 @@ export interface AnalyzeIntentOptions {
   fetchImplementation?: typeof fetch;
 }
 
+interface StructuredParticipant {
+  name: string;
+  organization: string | null;
+}
+
 interface StructuredIntent {
-  intent: "find_availability" | "change_availability_duration" | "find_facility_availability" | "select_booking_candidate" | "set_email_notification" | "book_meeting";
-  participantNames: string[];
+  intent: "find_availability" | "change_availability_duration" | "find_facility_availability" | "select_booking_candidate" | "set_email_notification" | "show_candidates" | "book_meeting";
+  participants: StructuredParticipant[];
   dateStart: string | null;
   dateEnd: string | null;
   durationMinutes: number | null;
@@ -81,8 +86,14 @@ async function requestStructuredIntent(
             "Analyze a Japanese DeskNet's scheduling request into the supplied JSON schema.",
             `Current instant: ${now.toISOString()}. Calendar timezone: Asia/Tokyo.`,
             "Resolve 今日, 明日, N週間以内, 今週, 来週, 今月中, and explicit ranges to inclusive YYYY-MM-DD dates.",
+            "今週 means today through this week's Friday (never Saturday or Sunday); if today is itself Saturday or Sunday, use just today as both dateStart and dateEnd.",
             "For N週間以内, start today and include N*7 calendar days including today.",
             "Use change_availability_duration when a follow-up only changes the meeting length.",
+            "Use show_candidates when the user changes their mind about a booking in progress and wants the previous candidate list shown again (e.g. やっぱりやめて、候補に戻して), without naming new participants or a new date.",
+            "If a participant's department or organization is named (e.g. 営業部の佐藤さん), set that participant's organization field to it; otherwise use null.",
+            "Participant names may be written with or without the honorific さん or a job title such as 部長 or 次長. Remove the honorific or job title from each participant name.",
+            "For find_availability, preserve a room/location restriction such as 会議室はアクトで in facilityQuery; otherwise use null.",
+            "For book_meeting, if the user does not name a specific room or facility, set facilityQuery to null; do not guess a facility. A per-user default preference is applied separately when facilityQuery is null.",
             "For a direct booking, return selectedStart and selectedEnd as ISO 8601 instants with the Asia/Tokyo offset represented correctly.",
             "Never authorize a browser write. Application policy performs separate final approval.",
             "Use null for fields that do not apply. Keep Japanese names exactly as written, removing さん from participant names.",
@@ -104,17 +115,31 @@ async function requestStructuredIntent(
 
 function validateStructuredIntent(value: StructuredIntent): DeskNetsTask {
   if (value.intent === "find_availability") {
-    if (value.participantNames.length === 0) throw new TypeError("LLM intent omitted participants.");
+    if (value.participants.length === 0) throw new TypeError("LLM intent omitted participants.");
     const date = readIsoDate(value.dateStart, "dateStart");
     const endDate = readIsoDate(value.dateEnd, "dateEnd");
     if (endDate < date) throw new TypeError("LLM intent returned an invalid date range.");
     const title = value.title === null ? undefined : readText(value.title, "title");
+    const participants = value.participants.map((participant) => {
+      const name = normalizeParticipantName(readText(participant.name, "participant name"));
+      if (name === "") throw new TypeError("LLM intent returned an empty participant name.");
+      const organization =
+        participant.organization === null
+          ? undefined
+          : readText(participant.organization, "participant organization");
+      return organization === undefined ? { name } : { name, organization };
+    });
+    const keys = participants.map((participant) => `${participant.name}:${participant.organization ?? ""}`);
+    if (new Set(keys).size !== keys.length) {
+      throw new TypeError("LLM intent returned duplicate participants.");
+    }
     return {
       type: "find_availability",
-      participantNames: value.participantNames.map((name) => readText(name, "participant")),
+      participants,
       date,
       endDate,
       durationMinutes: readDuration(value.durationMinutes),
+      ...(value.facilityQuery === null ? {} : { facilityQuery: readText(value.facilityQuery, "facilityQuery") }),
       ...(title === undefined ? {} : { title }),
     };
   }
@@ -134,6 +159,9 @@ function validateStructuredIntent(value: StructuredIntent): DeskNetsTask {
     if (typeof value.sendEmail !== "boolean") throw new TypeError("LLM intent omitted email choice.");
     return { type: "set_email_notification", sendEmail: value.sendEmail };
   }
+  if (value.intent === "show_candidates") {
+    return { type: "show_candidates" };
+  }
   const selectedStart = readOptionalInstant(value.selectedStart, "selectedStart");
   const selectedEnd = readOptionalInstant(value.selectedEnd, "selectedEnd");
   if ((selectedStart === undefined) !== (selectedEnd === undefined)) {
@@ -141,7 +169,7 @@ function validateStructuredIntent(value: StructuredIntent): DeskNetsTask {
   }
   const booking = {
     type: "book_meeting",
-    facilityQuery: readText(value.facilityQuery, "facilityQuery"),
+    ...(value.facilityQuery === null ? {} : { facilityQuery: readText(value.facilityQuery, "facilityQuery") }),
     title: value.title === null ? "" : readText(value.title, "title"),
     sendEmail: value.sendEmail ?? false,
   } as const;
@@ -204,8 +232,16 @@ const nullableString = { type: ["string", "null"] } as const;
 const INTENT_SCHEMA = {
   type: "object",
   properties: {
-    intent: { type: "string", enum: ["find_availability", "change_availability_duration", "find_facility_availability", "select_booking_candidate", "set_email_notification", "book_meeting"] },
-    participantNames: { type: "array", items: { type: "string" } },
+    intent: { type: "string", enum: ["find_availability", "change_availability_duration", "find_facility_availability", "select_booking_candidate", "set_email_notification", "show_candidates", "book_meeting"] },
+    participants: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { name: { type: "string" }, organization: nullableString },
+        required: ["name", "organization"],
+        additionalProperties: false,
+      },
+    },
     dateStart: nullableString,
     dateEnd: nullableString,
     durationMinutes: { type: ["integer", "null"] },
@@ -216,6 +252,6 @@ const INTENT_SCHEMA = {
     selectedStart: nullableString,
     selectedEnd: nullableString,
   },
-  required: ["intent", "participantNames", "dateStart", "dateEnd", "durationMinutes", "facilityQuery", "candidateNumber", "sendEmail", "title", "selectedStart", "selectedEnd"],
+  required: ["intent", "participants", "dateStart", "dateEnd", "durationMinutes", "facilityQuery", "candidateNumber", "sendEmail", "title", "selectedStart", "selectedEnd"],
   additionalProperties: false,
 } as const;

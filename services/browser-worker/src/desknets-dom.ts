@@ -14,6 +14,22 @@ interface ExtractedTimelineRow {
   blocks: TimelineBlock[];
 }
 
+export function mergeParticipantScheduleObservations(
+  previous: ParticipantSchedule[],
+  current: ParticipantSchedule[],
+): ParticipantSchedule[] {
+  const schedules = new Map(
+    previous.map((schedule) => [schedule.participantId, schedule]),
+  );
+  for (const schedule of current) {
+    const remembered = schedules.get(schedule.participantId);
+    if (remembered === undefined || schedule.busy.length > 0) {
+      schedules.set(schedule.participantId, schedule);
+    }
+  }
+  return Array.from(schedules.values());
+}
+
 export async function extractParticipantSchedules(
   pageRoot: Locator,
   dayStart: string,

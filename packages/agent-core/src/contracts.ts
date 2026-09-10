@@ -45,18 +45,24 @@ export interface CreateRunInput {
   mode: RunMode;
 }
 
+export interface ParticipantSelector {
+  name: string;
+  organization?: string;
+}
+
 export interface FindAvailabilityTask {
   type: "find_availability";
-  participantNames: string[];
+  participants: ParticipantSelector[];
   date: string;
   endDate: string;
   durationMinutes: number;
+  facilityQuery?: string;
   title?: string;
 }
 
 export interface BookMeetingTask {
   type: "book_meeting";
-  facilityQuery: string;
+  facilityQuery?: string;
   title: string;
   sendEmail: boolean;
   selectedStart?: string;
@@ -83,22 +89,61 @@ export interface SetEmailNotificationTask {
   sendEmail: boolean;
 }
 
+/**
+ * "やっぱりやめて、候補に戻して" — the user changed their mind about the
+ * booking in progress and wants the last candidate list re-displayed. This
+ * is a pure re-display of data already held in the thread's conversation
+ * state; it never touches the browser.
+ */
+export interface ShowCandidatesTask {
+  type: "show_candidates";
+}
+
 export type DeskNetsTask =
   | FindAvailabilityTask
   | ChangeAvailabilityDurationTask
   | FindFacilityAvailabilityTask
   | SelectBookingCandidateTask
   | SetEmailNotificationTask
+  | ShowCandidatesTask
   | BookMeetingTask;
+
+/**
+ * A requested participant name matched people in more than one
+ * organization (e.g. two people named 山本, one in 経営企画部 and one in
+ * 三晃) and no organization was named in the request to disambiguate. This
+ * carries what's needed to re-dispatch the same find_availability search
+ * once the user picks one, since (unlike PendingBookingContext) no search
+ * has actually succeeded yet at this point.
+ */
+export interface PendingParticipantChoice {
+  task: FindAvailabilityTask;
+  /**
+   * Position of the ambiguous participant within task.participants. Resolving
+   * by index (not by name) matters when the same name appears more than once
+   * in the request (e.g. "営業部の山本さんと、山本さん") — only the specific
+   * ambiguous one should be updated with the chosen organization.
+   */
+  participantIndex: number;
+  ambiguousName: string;
+  organizations: string[];
+}
 
 export interface PendingBookingContext {
   date: string;
   endDate?: string;
   durationMinutes: number;
-  participantNames?: string[];
+  participants?: ParticipantSelector[];
+  facilityQuery?: string;
   title?: string;
   participantIds: string[];
   availability: BookableAvailabilitySlot[];
+  /** Company-wide facility availability retained for changing location later. */
+  allFacilityAvailability?: BookableAvailabilitySlot[];
+  /** The requesting user's DeskNet's "代表組織", read from their own profile. */
+  userOrganization?: string;
+  /** The requesting user's DeskNet's display name, read from the schedule page's username control. */
+  userDisplayName?: string;
 }
 
 export interface BookingResult {
@@ -160,6 +205,7 @@ export interface BrowserRun {
     evidence: string[];
     availability?: Array<CommonAvailabilitySlot | BookableAvailabilitySlot>;
     pendingBooking?: PendingBookingContext;
+    participantChoice?: PendingParticipantChoice;
     meetingProposal?: MeetingProposal;
     approvalRequest?: BookingApprovalRequest;
     manualActionRequest?: ManualBookingActionRequest;

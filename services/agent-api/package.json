@@ -8,8 +8,9 @@
   "scripts": {
     "build": "tsc --build",
     "check": "tsc --build --pretty false",
-    "dev": "node --enable-source-maps dist/server.js",
-    "clean": "tsc --build --clean"
+    "dev": "node --enable-source-maps --env-file=../../.env.local dist/server.js",
+    "clean": "tsc --build --clean",
+    "test": "node --test dist/server.test.js dist/participant-alias-store.test.js dist/facility-change.test.js dist/structured-command.test.js"
   },
   "keywords": [],
   "author": "",

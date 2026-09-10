@@ -22,9 +22,9 @@
       .grid { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 20px; }
       .card { border: 1px solid #243a55; border-radius: 18px; padding: 22px; background: rgba(10, 25, 43, 0.84); box-shadow: 0 18px 70px rgba(0,0,0,.2); }
       label { display: block; margin-bottom: 8px; color: #c8d5e5; font-size: 14px; }
-      textarea, select { width: 100%; border: 1px solid #315071; border-radius: 12px; padding: 14px; background: #081421; color: inherit; font: inherit; }
+      textarea, select, input[type="text"] { width: 100%; border: 1px solid #315071; border-radius: 12px; padding: 14px; background: #081421; color: inherit; font: inherit; }
       textarea { min-height: 130px; resize: vertical; }
-      textarea:focus, select:focus { outline: 2px solid #42a5f5; border-color: transparent; }
+      textarea:focus, select:focus, input[type="text"]:focus { outline: 2px solid #42a5f5; border-color: transparent; }
       select { margin-bottom: 14px; }
       button { margin-top: 14px; width: 100%; border: 0; border-radius: 12px; padding: 13px 18px; background: #3da2ff; color: #04111f; font-weight: 800; cursor: pointer; }
       button:disabled { cursor: wait; opacity: .55; }
@@ -72,18 +72,27 @@
       .approval button { background: #ffad42; }
       .choice-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
       .choice-row button:last-child { background: #8fa4ba; }
+      .alias-manager { margin-top: 18px; border-top: 1px solid #243a55; padding-top: 16px; }
+      .alias-manager summary { cursor: pointer; color: #8fc7ff; font-weight: 800; }
+      .alias-form { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; margin-top: 14px; }
+      .alias-form button { width: auto; margin: 0; white-space: nowrap; }
+      .alias-list { display: grid; gap: 7px; margin-top: 12px; }
+      .alias-row { display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid #243a55; border-radius: 9px; }
+      .alias-row button { width: auto; margin: 0; padding: 7px 10px; background: #8fa4ba; }
+      .alias-arrow { color: #65dfb1; }
       @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } header { align-items: start; flex-direction: column; } }
+      @media (max-width: 520px) { .alias-form { grid-template-columns: 1fr; } .alias-row { grid-template-columns: 1fr auto; } .alias-arrow { display: none; } }
     </style>
   </head>
   <body>
     <main>
       <header>
         <div>
-          <div class="muted">CONVERSATIONAL POC</div>
+          <div class="muted"></div>
           <h1>Azure Browser Agent</h1>
-          <p>認識・判断・操作・検証を、ひとつのRunとして追跡します。</p>
+          <p style="display: none"></p>
         </div>
-        <div id="mode-badge" class="badge">Read + explicit booking</div>
+        <div id="mode-badge" class="badge" style="display: none"></div>
       </header>
       <div class="grid">
         <section class="card">
@@ -99,10 +108,27 @@
             <textarea id="prompt" required placeholder="例：テスト可能な参加者名と本日以降の日付を指定してください"></textarea>
             <button id="submit" type="submit">送信</button>
           </form>
+          <details class="alias-manager">
+            <summary>参加者の呼称辞書</summary>
+            <p class="muted">普段の呼び方を、DeskNet'sで検索する正式名へ変換します。</p>
+            <form id="alias-form" class="alias-form">
+              <div>
+                <label for="participant-alias">よく使われる呼称</label>
+                <input id="participant-alias" type="text" maxlength="40" required placeholder="例：こうちゃん" />
+              </div>
+              <div>
+                <label for="participant-formal-name">正式名</label>
+                <input id="participant-formal-name" type="text" maxlength="40" required placeholder="例：黄子超" />
+              </div>
+              <button type="submit">登録</button>
+            </form>
+            <div id="alias-status" class="muted"></div>
+            <div id="alias-list" class="alias-list"></div>
+          </details>
           <p id="site-note" class="muted">Mock画面から共通空き時間を計算します。</p>
         </section>
         <section class="card">
-          <h2>Run details</h2>
+          <h2 style="display: none"></h2>
           <div id="output" class="empty">Runを開始すると、ここに状態と証跡が表示されます。</div>
         </section>
       </div>
@@ -117,11 +143,40 @@
       const siteNote = document.querySelector("#site-note");
       const conversation = document.querySelector("#conversation");
       const modeBadge = document.querySelector("#mode-badge");
+      const aliasForm = document.querySelector("#alias-form");
+      const participantAliasInput = document.querySelector("#participant-alias");
+      const participantFormalNameInput = document.querySelector("#participant-formal-name");
+      const aliasStatus = document.querySelector("#alias-status");
+      const aliasList = document.querySelector("#alias-list");
       const threadId = crypto.randomUUID();
       const renderedAssistantStates = new Set();
 
       siteInput.addEventListener("change", renderSiteNote);
       renderSiteNote();
+      loadParticipantAliases();
+
+      aliasForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        aliasStatus.textContent = "登録しています…";
+        try {
+          const response = await fetch(`${apiBase}/browser-agent/participant-aliases`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              alias: participantAliasInput.value,
+              formalName: participantFormalNameInput.value,
+            }),
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error ?? "呼称を登録できませんでした。");
+          participantAliasInput.value = "";
+          participantFormalNameInput.value = "";
+          aliasStatus.textContent = "登録しました。";
+          await loadParticipantAliases();
+        } catch (error) {
+          aliasStatus.textContent = error instanceof Error ? error.message : String(error);
+        }
+      });
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -175,25 +230,65 @@
         throw new Error("Runの完了待ちがタイムアウトしました。");
       }
 
+      async function loadParticipantAliases() {
+        try {
+          const response = await fetch(`${apiBase}/browser-agent/participant-aliases`);
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.error ?? "呼称辞書を取得できませんでした。");
+          renderParticipantAliases(body.aliases ?? []);
+        } catch (error) {
+          aliasStatus.textContent = error instanceof Error ? error.message : String(error);
+        }
+      }
+
+      function renderParticipantAliases(aliases) {
+        aliasList.replaceChildren();
+        if (aliases.length === 0) {
+          aliasList.append(element("div", "muted", "登録はありません。"));
+          return;
+        }
+        for (const entry of aliases) {
+          const row = element("div", "alias-row");
+          const remove = element("button", "", "削除");
+          remove.type = "button";
+          remove.addEventListener("click", async () => {
+            remove.disabled = true;
+            try {
+              const response = await fetch(
+                `${apiBase}/browser-agent/participant-aliases/${encodeURIComponent(entry.alias)}`,
+                { method: "DELETE" },
+              );
+              const body = await response.json();
+              if (!response.ok) throw new Error(body.error ?? "呼称を削除できませんでした。");
+              aliasStatus.textContent = "削除しました。";
+              await loadParticipantAliases();
+            } catch (error) {
+              remove.disabled = false;
+              aliasStatus.textContent = error instanceof Error ? error.message : String(error);
+            }
+          });
+          row.append(
+            element("span", "", entry.alias),
+            element("span", "alias-arrow", "→"),
+            element("span", "", entry.formalName),
+            remove,
+          );
+          aliasList.append(row);
+        }
+      }
+
       function render(run) {
         output.replaceChildren();
         const status = element("div", "status");
-        status.append(element("span", `dot ${run.status}`), element("strong", "", run.status));
+        const statusLabel = run.status === "completed" ? "完了" : run.status === "running" ? "処理中.." : run.status;
+        status.append(element("span", `dot ${run.status}`), element("strong", "", statusLabel));
         output.append(
           status,
-          element("div", "muted", `Run ID: ${run.id}`),
-          run.intentSource
-            ? element("div", "muted", `Intent解析: ${run.intentSource === "azure_openai" ? "Azure OpenAI" : "決定的フォールバック"}`)
-            : element("span", ""),
         );
-        modeBadge.textContent = run.result?.manualActionRequest
-          ? "DeskNet'sで追加待ち（未登録）"
-          : run.input.mode === "write"
-          ? run.status === "awaiting_approval" ? "最終確認待ち（未登録）" : "Booking workflow"
-          : run.status === "awaiting_user_input" ? "ミーティング内容の確認待ち" : "Read-only availability check";
+        modeBadge.textContent = "";
 
         if (run.result) {
-          output.append(element("p", "", run.result.assistantMessage ?? run.result.summary));
+          output.append(element("p", "", "以下の候補から選択してください。するとdesknetsの「予定の追加」の画面が開くので、手動で予定を確定させてください。"));
           if (run.task?.type === "find_availability") {
             output.append(renderActionableAvailabilityByDate(
               run.result.availability ?? [],
@@ -217,29 +312,19 @@
           }
         }
 
-        const timeline = element("div", "timeline");
-        for (const step of run.steps) {
-          const item = element("div", "step");
-          item.append(
-            element("strong", "", `Step ${step.sequence}: ${step.action.type}`),
-            element("div", "muted", step.reasoning),
-            element("pre", "", JSON.stringify({
-              before: step.observationBefore.summary,
-              action: step.action,
-              after: step.observationAfter.summary,
-              verified: step.verified,
-            }, null, 2)),
-          );
-          const evidence = element("div", "evidence");
-          evidence.append(
-            screenshot(step.observationBefore.screenshotRef, "操作前"),
-            screenshot(step.observationAfter.screenshotRef, "操作後"),
-          );
-          item.append(evidence);
-          timeline.append(item);
+        if (run.error) {
+          output.append(element("p", "", run.error));
+          output.append(renderBackToCandidatesButton());
         }
-        output.append(timeline);
-        if (run.error) output.append(element("p", "", run.error));
+      }
+
+      function renderBackToCandidatesButton() {
+        const wrap = element("div", "choice-row");
+        const back = element("button", "", "候補に戻る");
+        back.type = "button";
+        back.addEventListener("click", () => submitPrompt("候補に戻して"));
+        wrap.append(back);
+        return wrap;
       }
 
       function renderMeetingProposal(proposal) {
@@ -380,21 +465,21 @@
 
       function renderError(error) {
         output.replaceChildren(element("div", "status", error instanceof Error ? error.message : String(error)));
+        output.append(renderBackToCandidatesButton());
       }
 
       function renderManualHandoff(request) {
         const panel = element("div", "approval");
         panel.append(
           element("strong", "", "DeskNet'sで内容確認・手動追加待ち"),
-          element("p", "", `議題: ${request.title || "未入力（DeskNet'sで入力してください）"}\n日時: ${formatSlot(request)}\n参加者: ${request.participantIds.join("、")}\n設備: ${request.facilityId}\nメール: ${request.emailNotificationWillBeSent ? "送信する" : "送信しない"}\n自分には通知しない: オフ\n\n専用Edgeに入力済みの予約画面を表示しています。内容を確認し、DeskNet's上の「追加」を押してください。Agentは追加を押しません。`),
+          element("p", "", `議題: ${request.title || "未入力（DeskNet'sで入力してください）"}\n日時: ${formatSlot(request)}\n参加者: ${request.participantIds.join("、")}\n設備: ${request.facilityId}\nメール: ${request.emailNotificationWillBeSent ? "送信する" : "送信しない"}\n自分には通知しない: オフ\n\n専用Edgeに入力済みの予約画面を表示しています。内容を確認し、DeskNet's上の「追加」を押してください。Agentは追加を押しません。\n\n別の候補にしたい場合や、DeskNet'sを閉じてしまった場合は「候補に戻る」を押してください。`),
+          renderBackToCandidatesButton(),
         );
         return panel;
       }
 
       function renderSiteNote() {
-        siteNote.textContent = siteInput.value === "desknets"
-          ? "候補を選ぶとDeskNet'sの予約画面へ日時・参加者・設備・メール設定を入力します。議題と内容を確認し、最後の「追加」はDeskNet's上でユーザーが押します。Agentは追加を押しません。"
-          : "Mock画面から共通空き時間を計算します。";
+        siteNote.textContent = "";
       }
 
       function appendMessage(role, text) {

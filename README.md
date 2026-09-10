@@ -11,7 +11,7 @@ Webページを視覚的・意味的に理解し、自然言語の指示に応�
 - 共通の空き時間を計算する
 - 候補をWeb Consoleに表示する
 
-現在のPoCは、空き時間確認、設備による候補絞り込み、番号選択、メール通知確認の会話に対応します。AgentはDeskNet'sの予約フォームまで準備しますが、最終登録とメール送信を開始する「追加」は押しません。内容を確認したユーザーがDeskNet's上で直接押します。
+現在のPoCは、空き時間確認、設備による候補絞り込み、番号または時刻による選択、AzureChat上の最終確認に対応します。Agentは確認内容を表示し、認証済みUserが「確定してDeskNet'sに登録」を押した場合に限り、内容を再照合して「追加」を実行します。
 
 ## Planned structure
 
@@ -49,7 +49,7 @@ The first runnable milestone is available:
 - Asia/Tokyo relative ranges such as `今日`, `明日`, `1週間以内`, and `今月中` (maximum 31 days)
 - a single-execution DeskNet's queue so runs cannot operate the dedicated Edge concurrently
 - automatic participant selection from the schedule list
-- room/date/time/optional-title entry, participant email configuration, and manual handoff to the DeskNet's Add screen
+- room/date/time/title entry, participant email configuration, and explicit AzureChat approval before the DeskNet's Add action
 
 The DeskNet's flow starts from the schedule list. The first prompt selects the
 named participants, reads participant and company-wide facility availability,
@@ -120,6 +120,23 @@ npm run dev:web
 
 Then open `http://127.0.0.1:3000`.
 
+Set `AGENT_API_KEY` before exposing the Agent API outside the local machine.
+When it is set, every endpoint except `/health` requires
+`Authorization: Bearer <key>`. Leaving it blank preserves the unauthenticated
+loopback-only local development flow. Configure AzureChat's
+`DESKNETS_AGENT_API_KEY` with the same secret; never commit either value.
+
+### Participant call-name dictionary
+
+Open **参加者の呼称辞書** in the Web Console to register a commonly used
+call name and its formal DeskNet's name, for example `こうちゃん` -> `黄子超`.
+The Agent API replaces registered call names before participant parsing, so the
+same dictionary also applies when a request comes from AzureChat. Entries can be
+listed, updated, and deleted in the Web Console and persist across API restarts.
+By default, they are stored in the Git-ignored
+`.data/desknets-participant-aliases.json`; set
+`DESKNETS_PARTICIPANT_ALIASES_PATH` to use another local path.
+
 Create or refresh the local DeskNet's Microsoft Edge session with a manual login:
 
 ```bash
@@ -138,12 +155,11 @@ login or MFA step remains manual.
 For a DeskNet's run, keep exactly one approved DeskNet's schedule-list tab open.
 Select `DeskNet's` in the Web Console and enter a prompt such as
 `髙田さん、山本さんと私で8月6日に打ち合わせ可能な時間を教えて`.
-After the availability response, ask `ルームCが空いている時間帯は？`, select
-one of the clickable slots (or type `では1で確定して`), then answer the email
-question with `はい` or `いいえ`. Review the displayed title, time, participants,
-facility, and email warning. The dedicated Edge then shows the prepared DeskNet's
-reservation form. Enter an agenda if it was not supplied, review every field, and
-press **追加** in DeskNet's yourself. The Agent never presses that button.
+After the availability response, select a candidate by number or reply with only
+the offered time, such as `では15時-16時で`. Review the title, time,
+participants, facility, and email setting in AzureChat. The Agent performs the
+DeskNet's **追加** action only after the authenticated user presses the explicit
+confirmation button; duplicate or expired approval attempts are rejected.
 Additional login or MFA remains manual.
 
 See `HANDOFF.md` for the broader design and implementation plan.

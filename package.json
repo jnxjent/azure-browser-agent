@@ -9,7 +9,7 @@
     "auth:desknets": "npm run auth:desknets --workspace @azure-browser-agent/browser-worker --",
     "dev:api": "npm run dev --workspace @azure-browser-agent/agent-api",
     "dev:web": "npm run dev --workspace @azure-browser-agent/web-console",
-    "test": "npm run check && npm run test --workspace @azure-browser-agent/agent-core && npm run test --workspace @azure-browser-agent/browser-worker"
+    "test": "npm run check && npm run test --workspace @azure-browser-agent/agent-core && npm run test --workspace @azure-browser-agent/browser-worker && npm run test --workspace @azure-browser-agent/agent-api"
   },
   "keywords": [],
   "author": "",

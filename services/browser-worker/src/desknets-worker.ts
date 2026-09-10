@@ -14,6 +14,9 @@ import {
   type BrowserRun,
   type FindAvailabilityTask,
   type Observation,
+  type PendingBookingContext,
+  type ParticipantSchedule,
+  type ParticipantSelector,
   type RunExecutor,
   type RunLimits,
 } from "@azure-browser-agent/agent-core";
@@ -21,7 +24,11 @@ import { chromium, type Browser, type Locator, type Page } from "playwright";
 import {
   extractFacilitySchedules,
   extractParticipantSchedules,
+  mergeParticipantScheduleObservations,
 } from "./desknets-dom.js";
+import { resolveUniqueAppointmentHref } from "./desknets-appointments.js";
+import { keepMeetingRoomFacilities } from "./desknets-facilities.js";
+import { resolveSelfOrganizationParticipants } from "./desknets-participants.js";
 
 interface DeskNetsWorkerOptions {
   cdpEndpoint?: string;
@@ -75,7 +82,10 @@ export class DeskNetsBrowserWorker implements RunExecutor {
           artifactDirectory,
           startedAt,
         });
-        preservePreparedForm = true;
+        // Only a genuine success leaves a form worth preserving for a
+        // follow-up booking; an ambiguous-participant pause has already
+        // abandoned its partially-filled form and should be cleaned up here.
+        preservePreparedForm = completed.status === "completed";
         return completed;
       }
       if (run.task?.type === "book_meeting") {
@@ -135,7 +145,21 @@ interface DeskNetsExecutionContext {
 async function executeAvailabilityRun(
   context: DeskNetsExecutionContext & { task: FindAvailabilityTask },
 ): Promise<BrowserRun> {
-  const { run, task, page, signal, limits, artifactDirectory, startedAt } = context;
+  const { run, task: requestedTask, page, signal, limits, artifactDirectory, startedAt } = context;
+  await ensureScheduleList(page);
+  signal.throwIfAborted();
+  // Read the requester's own department once, while the schedule list (not an
+  // unsaved form) is on screen, so a later booking step can resolve a default
+  // meeting room without navigating away from an in-progress, unsaved form.
+  const { organization: userOrganization, displayName: userDisplayName } =
+    await readCurrentUserProfile(page);
+  const task: FindAvailabilityTask = {
+    ...requestedTask,
+    participants: resolveSelfOrganizationParticipants(
+      requestedTask.participants,
+      userOrganization,
+    ),
+  };
   await ensureScheduleList(page);
   signal.throwIfAborted();
   const action: BrowserAction = { type: "click", target: "利用設備" };
@@ -143,6 +167,7 @@ async function executeAvailabilityRun(
   const dates = enumerateDates(task.date, task.endDate);
   const participantAvailability: BookableAvailabilitySlot[] = [];
   const availability: BookableAvailabilitySlot[] = [];
+  const allFacilityAvailability: BookableAvailabilitySlot[] = [];
   let participantIds: string[] = [];
   let participantRowCount = 0;
   let facilityRowCount = 0;
@@ -151,16 +176,57 @@ async function executeAvailabilityRun(
 
   for (let index = 0; index < dates.length; index += 1) {
     const date = dates[index] as string;
+    let participantSchedules: ParticipantSchedule[];
     if (index > 0) {
       await discardPreparedForm(page);
       await ensureScheduleList(page);
     }
-    await openAvailabilityForm(page, { ...task, date, endDate: date });
+    try {
+      participantSchedules = await openAvailabilityForm(page, { ...task, date, endDate: date });
+    } catch (error) {
+      if (error instanceof AmbiguousParticipantError) {
+        if (error.participantIndex === undefined) {
+          throw new Error(
+            `Internal error: AmbiguousParticipantError for "${error.participantName}" is missing its participant index.`,
+          );
+        }
+        // Ambiguity is a property of the name/organization pairing, not of
+        // the specific date, so it would recur identically on every
+        // remaining date — no point continuing the loop. execute()'s
+        // finally block discards the partially-filled form since this
+        // return isn't "completed".
+        return {
+          ...run,
+          status: "awaiting_user_input",
+          updatedAt: new Date().toISOString(),
+          result: {
+            summary: `Participant name "${error.participantName}" matched more than one organization.`,
+            assistantMessage: `${error.participantName}さんが複数見つかりました。どちらですか？\n${error.organizations.map((organization) => `・${organization}`).join("\n")}\n組織名で答えてください。`,
+            evidence: [
+              `Ambiguous participant: ${error.participantName}`,
+              `Organizations: ${error.organizations.join("、")}`,
+            ],
+            participantChoice: {
+              task,
+              participantIndex: error.participantIndex,
+              ambiguousName: error.participantName,
+              organizations: error.organizations,
+            },
+          },
+        };
+      }
+      throw error;
+    }
     const dayStart = `${date}T00:00:00+09:00`;
-    const participantSchedules = await extractParticipantSchedules(page.locator("body"), dayStart);
     participantRowCount = participantSchedules.length;
-    if (participantRowCount !== task.participantNames.length + 1) {
-      throw new Error(`Expected ${task.participantNames.length + 1} participant rows, found ${participantRowCount}.`);
+    if (participantRowCount !== task.participants.length + 1) {
+      throw new Error(`Expected ${task.participants.length + 1} participant rows, found ${participantRowCount}.`);
+    }
+    const distinctParticipantIds = new Set(participantSchedules.map((schedule) => schedule.participantId));
+    if (distinctParticipantIds.size !== participantSchedules.length) {
+      throw new Error(
+        "Two requested participants resolved to the same DeskNet's person; check for inconsistent organization qualifiers.",
+      );
     }
     if (participantIds.length === 0) {
       participantIds = participantSchedules.map((schedule) => schedule.participantId);
@@ -183,8 +249,10 @@ async function executeAvailabilityRun(
     }
     await confirmVisibleDialog(page, "登録先");
     await openFacilityDialog(page);
-    const facilitySchedules = deduplicateFacilitySchedules(
-      await extractFacilitySchedules(page.locator("body"), dayStart),
+    const facilitySchedules = keepMeetingRoomFacilities(
+      deduplicateFacilitySchedules(
+        await extractFacilitySchedules(page.locator("body"), dayStart),
+      ),
     );
     facilityRowCount = facilitySchedules.length;
     if (index === dates.length - 1) {
@@ -204,6 +272,7 @@ async function executeAvailabilityRun(
       durationMinutes: task.durationMinutes,
       incrementMinutes: 30,
       schedules: participantSchedules,
+      ...(task.facilityQuery === undefined ? {} : { facilityQuery: task.facilityQuery }),
     };
     participantAvailability.push(
       ...filterFutureAvailability(findCommonAvailability(availabilityRequest)).map((slot) => ({
@@ -213,6 +282,11 @@ async function executeAvailabilityRun(
     );
     availability.push(...filterFutureAvailability(findBookableAvailability({
       ...availabilityRequest,
+      facilities: facilitySchedules,
+    })));
+    const { facilityQuery: _facilityQuery, ...companyWideRequest } = availabilityRequest;
+    allFacilityAvailability.push(...filterFutureAvailability(findBookableAvailability({
+      ...companyWideRequest,
       facilities: facilitySchedules,
     })));
     assertWithinDuration(startedAt, limits.maxRunDurationMs);
@@ -228,10 +302,14 @@ async function executeAvailabilityRun(
     date: task.date,
     endDate: task.endDate,
     durationMinutes: task.durationMinutes,
-    participantNames: task.participantNames,
+    participants: task.participants,
+    ...(task.facilityQuery === undefined ? {} : { facilityQuery: task.facilityQuery }),
     ...(task.title === undefined ? {} : { title: task.title }),
     participantIds,
     availability,
+    allFacilityAvailability,
+    ...(userOrganization === undefined ? {} : { userOrganization }),
+    ...(userDisplayName === undefined ? {} : { userDisplayName }),
   };
   return {
     ...run,
@@ -276,8 +354,10 @@ async function executeBookingRun(
   const { run, task, page, signal, limits, artifactDirectory } = context;
   const pending = run.context;
   if (pending === undefined) throw new Error("Pending booking context is missing.");
-  await assertPreparedBookingForm(page, pending.participantIds);
 
+  if (task.facilityQuery === undefined) {
+    throw new Error("Agent API must resolve a concrete facility before dispatching a booking run.");
+  }
   const facilityId = resolveFacility(task.facilityQuery, pending.availability);
   const slot = pending.availability.find(
     (candidate) =>
@@ -297,6 +377,86 @@ async function executeBookingRun(
   }
   signal.throwIfAborted();
   const selectedDate = japanDateFromInstant(slot.start);
+
+  if (run.approval?.approvedAt !== undefined) {
+    await ensurePreparedBookingFormForCandidate(page, pending, selectedDate, signal);
+    await page.locator('input[name="detail"]:visible').fill(task.title);
+    await assertBookingFormMatches(
+      page,
+      task,
+      slot,
+      facilityId,
+      selectedDate,
+      pending.participantIds,
+    );
+    const observationBefore = await observe(
+      page,
+      run.id,
+      "before.png",
+      artifactDirectory,
+      "Verified the prepared DeskNet's booking form immediately before final approved registration.",
+      ["Meeting title", "Date and time", "Participants", "Facility", "Email notification", "追加"],
+    );
+    const addAction: BrowserAction = { type: "click", target: "追加" };
+    assertActionAllowed(addAction, limits, "write", true);
+    await clickFinalRegistration(page);
+    const verified = await verifyCreatedAppointment(
+      page,
+      task.title,
+      slot,
+      facilityId,
+      pending.participantIds,
+    );
+    if (!verified) {
+      throw new Error("DeskNet'sへの予定登録を確認できませんでした。");
+    }
+    const observationAfter = await observe(
+      page,
+      run.id,
+      "after.png",
+      artifactDirectory,
+      "Verified the newly registered DeskNet's appointment.",
+      ["Meeting title", "Date and time", "Participants", "Facility"],
+    );
+    return {
+      ...run,
+      status: "completed",
+      updatedAt: new Date().toISOString(),
+      steps: [
+        ...run.steps,
+        {
+          sequence: run.steps.length + 1,
+          observationBefore,
+          reasoning: "The authenticated AzureChat user explicitly approved this exact booking proposal.",
+          action: addAction,
+          observationAfter,
+          verified: true,
+        },
+      ],
+      result: {
+        summary: "Registered and verified the DeskNet's appointment after explicit approval.",
+        assistantMessage: "DeskNet'sへの予定登録が完了しました。",
+        evidence: [observationBefore.screenshotRef, observationAfter.screenshotRef],
+        booking: {
+          title: task.title,
+          start: slot.start,
+          end: slot.end,
+          participantIds: pending.participantIds,
+          facilityId,
+          emailNotificationConfigured: task.sendEmail,
+          verified: true,
+        },
+      },
+    };
+  }
+
+  await ensurePreparedBookingFormForCandidate(
+    page,
+    pending,
+    selectedDate,
+    signal,
+  );
+
   await fillBookingForm(page, task, slot, facilityId, selectedDate);
 
   const observationBefore = await observe(
@@ -307,7 +467,7 @@ async function executeBookingRun(
     `Prepared ${task.title === "" ? "an editable blank agenda" : task.title}, ${formatJapanDateTime(slot.start)}-${formatJapanTime(slot.end)}, ${facilityId}, with email notification ${task.sendEmail ? "enabled" : "disabled"} and self-notification suppression disabled.`,
     ["Meeting title", "Date and time", "Participants", "Facility", "Email notification"],
   );
-  const windowFocused = await bringPreparedFormToFront(page);
+  await bringPreparedFormToFront(page);
   const preparationAction: BrowserAction = {
     type: "type_text",
     target: "予定フォーム",
@@ -316,37 +476,54 @@ async function executeBookingRun(
   assertActionAllowed(preparationAction, limits, "write");
   return {
     ...run,
-    status: "awaiting_user_input",
+    status: "awaiting_approval",
     updatedAt: new Date().toISOString(),
+    approval: {
+      requestedAt: new Date().toISOString(),
+    },
     steps: [
       ...run.steps,
       {
         sequence: run.steps.length + 1,
         observationBefore,
         reasoning:
-          "Prepare the DeskNet's booking form and hand the final Add action to the user without clicking it automatically.",
+          "Prepare the DeskNet's booking form and wait for explicit approval from AzureChat before clicking Add.",
         action: preparationAction,
         observationAfter: observationBefore,
         verified: true,
       },
     ],
     result: {
-      summary: "Prepared the DeskNet's booking form for manual submission.",
-      assistantMessage: task.title === ""
-        ? `DeskNet'sの予約画面を${windowFocused ? "最前面に表示しました" : "専用Edgeに開きました"}。議題を入力し、日時・登録先・利用設備・メール設定を確認してから、DeskNet's上の「追加」を押してください。Agentは追加を押しません。`
-        : `DeskNet'sの予約画面を${windowFocused ? "最前面に表示し" : "専用Edgeに開き"}、議題「${task.title}」を転記しました。内容を確認してから、DeskNet's上の「追加」を押してください。Agentは追加を押しません。`,
+      summary: "Prepared the DeskNet's booking form and requested explicit AzureChat approval.",
+      assistantMessage: "以下の内容を確認し、AzureChatの「確定してDeskNet'sに登録」ボタンを押してください。ボタンを押すまで予定は登録されません。",
       evidence: [observationBefore.screenshotRef],
-      manualActionRequest: {
+      approvalRequest: {
         title: task.title,
         start: slot.start,
         end: slot.end,
         participantIds: pending.participantIds,
         facilityId,
         emailNotificationWillBeSent: task.sendEmail,
-        selfNotificationSuppressed: false,
       },
     },
   };
+}
+
+async function clickFinalRegistration(page: Page): Promise<void> {
+  const candidates = page.getByText("追加", { exact: true });
+  let visibleButton: Locator | undefined;
+  for (let index = 0; index < (await candidates.count()); index += 1) {
+    const candidate = candidates.nth(index);
+    if (await candidate.isVisible()) {
+      visibleButton = candidate;
+      break;
+    }
+  }
+  if (visibleButton === undefined) {
+    throw new Error("DeskNet'sの追加ボタンが見つかりません。");
+  }
+  await visibleButton.click({ noWaitAfter: true });
+  await confirmFinalRegistrationIfNeeded(page);
 }
 
 async function bringPreparedFormToFront(page: Page): Promise<boolean> {
@@ -427,7 +604,62 @@ async function ensureScheduleList(page: Page): Promise<void> {
   });
 }
 
-async function openAvailabilityForm(page: Page, task: FindAvailabilityTask): Promise<void> {
+interface CurrentUserProfile {
+  organization?: string;
+  displayName?: string;
+}
+
+// Failure here (profile DOM change, transient navigation error, etc.) must
+// not block an availability search that doesn't end up needing a facility
+// preference at all. Each field is independently omitted on failure to read
+// it; the room-preference lookup then surfaces its own "会議室を指定して
+// ください。" only if the user actually reaches a preference-dependent
+// booking without naming a room. displayName is read from the schedule
+// page's own username dropdown (#dn-h-username, the same element already
+// used to reach the profile page) before navigating away, since it lets
+// individual exceptions (someone whose real work location differs from
+// their 代表組織-based default) be layered on top of the organization-level
+// preference table without adding a new DOM dependency.
+async function readCurrentUserProfile(page: Page): Promise<CurrentUserProfile> {
+  const scheduleUrl = page.url();
+  const displayName = await page
+    .locator("#dn-h-username")
+    .first()
+    .innerText()
+    .then((text) => text.trim())
+    .catch(() => "");
+  const profileUrl = new URL(scheduleUrl);
+  profileUrl.hash = "";
+  profileUrl.searchParams.set("cmd", "psetindex");
+  try {
+    await page.goto(profileUrl.href, { waitUntil: "load" });
+    const organizationSelect = page.locator('select[name="Group"]:visible').first();
+    await organizationSelect.waitFor({ state: "visible", timeout: 10_000 });
+    const organization = await organizationSelect.evaluate((element) => {
+      const select = element as HTMLSelectElement;
+      return select.options[select.selectedIndex]?.text.trim() ?? "";
+    });
+    return {
+      ...(organization === "" ? {} : { organization }),
+      ...(displayName === "" ? {} : { displayName }),
+    };
+  } catch {
+    return displayName === "" ? {} : { displayName };
+  } finally {
+    // A failure here must not override whatever the try/catch above already
+    // decided to return — otherwise a return-navigation hiccup turns a
+    // graceful "profile unreadable" result into a hard failure of the whole
+    // availability search. ensureScheduleList() runs again right after this
+    // function returns and will surface its own clear error if the page
+    // truly isn't back on the schedule list.
+    await page.goto(scheduleUrl, { waitUntil: "load" }).catch(() => {});
+  }
+}
+
+async function openAvailabilityForm(
+  page: Page,
+  task: FindAvailabilityTask,
+): Promise<ParticipantSchedule[]> {
   const currentUser = page.locator('input[type="checkbox"]:visible').first();
   if ((await currentUser.count()) !== 1) throw new Error("Current user schedule row was not found.");
   if (!(await currentUser.isChecked())) await currentUser.click({ noWaitAfter: true });
@@ -446,26 +678,157 @@ async function openAvailabilityForm(page: Page, task: FindAvailabilityTask): Pro
   await dialog.waitFor({ state: "visible", timeout: 10_000 });
   await page.waitForTimeout(1_500);
 
-  for (const name of task.participantNames) {
-    const rows = dialog.locator("tr");
-    let addControl;
-    for (let index = 0; index < (await rows.count()); index += 1) {
-      const row = rows.nth(index);
-      if (!(await row.innerText()).includes(name)) continue;
-      const candidate = row.getByText("追加", { exact: true });
-      if ((await candidate.count()) === 1 && (await candidate.isVisible())) {
-        if (addControl !== undefined) throw new Error(`Participant name is ambiguous: ${name}`);
-        addControl = candidate;
-      }
+  const dayStart = `${task.date}T00:00:00+09:00`;
+  let observedSchedules: ParticipantSchedule[] = [];
+  const rememberVisibleSchedules = async (): Promise<void> => {
+    const visibleSchedules = await extractParticipantSchedules(page.locator("body"), dayStart);
+    // DeskNet's can clear an earlier row's painted blocks while adding a
+    // later participant. Never replace observed busy intervals with that
+    // transient empty rendering.
+    observedSchedules = mergeParticipantScheduleObservations(
+      observedSchedules,
+      visibleSchedules,
+    );
+  };
+  await rememberVisibleSchedules();
+
+  for (let index = 0; index < task.participants.length; index += 1) {
+    const selector = task.participants[index] as ParticipantSelector;
+    try {
+      await selectParticipant(dialog, page, selector);
+    } catch (error) {
+      // selectParticipant doesn't know its own position in task.participants,
+      // but the caller (executeAvailabilityRun) needs it to update only the
+      // specific ambiguous entry rather than every participant sharing that
+      // name (e.g. "営業部の山本さんと、山本さん").
+      if (error instanceof AmbiguousParticipantError) error.participantIndex = index;
+      throw error;
     }
-    if (addControl === undefined) throw new Error(`Participant was not found: ${name}`);
-    await addControl.click({ noWaitAfter: true });
-    await page.waitForTimeout(350);
+    await page.waitForTimeout(750);
+    await rememberVisibleSchedules();
   }
-  const expectedRows = task.participantNames.length + 1;
+  const expectedRows = task.participants.length + 1;
   const selectedRows = dialog.locator(".co-sel-bottom table tbody tr");
   if ((await selectedRows.count()) !== expectedRows) {
     throw new Error(`Expected ${expectedRows} selected participant rows.`);
+  }
+  const selectedParticipantIds = await selectedRows.evaluateAll((rows) =>
+    rows.map((row) => row.querySelector(".name-text")?.textContent?.trim() ?? ""),
+  );
+  const schedulesByParticipant = new Map(
+    observedSchedules.map((schedule) => [schedule.participantId, schedule]),
+  );
+  return selectedParticipantIds.map((participantId) => {
+    const schedule = schedulesByParticipant.get(participantId);
+    if (schedule === undefined) {
+      throw new Error(`No schedule observation was captured for ${participantId}.`);
+    }
+    return schedule;
+  });
+}
+
+// Thrown instead of a plain Error when a requested name (with no
+// organization given to disambiguate) matches people in more than one
+// organization. executeAvailabilityRun catches this specifically and turns
+// it into an "awaiting_user_input" run asking the user to pick one, instead
+// of failing the whole search outright. participantIndex is set by
+// openAvailabilityForm's loop, not by selectParticipant itself (which has no
+// visibility into its own position in the participants list).
+class AmbiguousParticipantError extends Error {
+  participantIndex: number | undefined;
+
+  constructor(
+    public readonly participantName: string,
+    public readonly organizations: string[],
+  ) {
+    super(`Participant name is ambiguous: ${participantName}.`);
+    this.name = "AmbiguousParticipantError";
+  }
+}
+
+async function selectParticipant(
+  dialog: Locator,
+  page: Page,
+  selector: ParticipantSelector,
+): Promise<void> {
+  const searchTab = dialog.locator("li.co-sel-search a").first();
+  await searchTab.click({ noWaitAfter: true });
+  const nameField = dialog.locator('input[name="name"]:visible').first();
+  await nameField.waitFor({ state: "visible", timeout: 5_000 });
+  await nameField.fill(selector.name);
+  const keyField = dialog.locator('input[name="key"]:visible').first();
+  if ((await keyField.count()) === 1) await keyField.fill("");
+
+  // The results table exists in the DOM (possibly hidden, e.g. before the
+  // first search of this dialog session) even when no search has run yet, so
+  // read its baseline content without requiring visibility first.
+  const resultsTable = dialog.locator(".co-sel-list-scroll table.co-sel-table-list");
+  const previousResultsHtml = await resultsTable.innerHTML().catch(() => "");
+  // Clicking the search form's submit input does not reliably submit the name
+  // search (it can land on an unrelated default listing); pressing Enter in the
+  // name field submits the correct form.
+  await nameField.press("Enter");
+  await resultsTable.waitFor({ state: "visible", timeout: 10_000 });
+  await waitForResultsToRefresh(resultsTable, previousResultsHtml);
+  await page.waitForTimeout(300);
+
+  const rows = resultsTable.locator("tbody tr");
+  const rowCount = await rows.count();
+  const nameMatches: Array<{ row: Locator; organization: string }> = [];
+  for (let index = 0; index < rowCount; index += 1) {
+    const row = rows.nth(index);
+    const nameSpan = row.locator("span.co-sel-name");
+    if ((await nameSpan.count()) !== 1) continue;
+    // DeskNet's displays the full "surname+given name" with no separator, while
+    // Japanese requests typically name only the surname (e.g. "甲斐さん"), so the
+    // requested name is expected to be a prefix of the displayed name.
+    if (!(await nameSpan.innerText()).trim().startsWith(selector.name)) continue;
+    const organizationSpan = row.locator("span.co-busyo-def");
+    const organization = (await organizationSpan.count()) === 1 ? (await organizationSpan.innerText()).trim() : "";
+    nameMatches.push({ row, organization });
+  }
+
+  if (nameMatches.length === 0) {
+    throw new Error(`Participant was not found: ${selector.name}`);
+  }
+  const matches =
+    selector.organization === undefined
+      ? nameMatches
+      : nameMatches.filter((match) => match.organization.includes(selector.organization as string));
+  if (matches.length === 0) {
+    throw new Error(
+      `Participant ${selector.name} was found, but none belong to the requested organization: ${selector.organization}`,
+    );
+  }
+  if (matches.length > 1) {
+    // Exclude rows DeskNet's didn't expose an organization for — offering ""
+    // as a choice would be unusable, and (server-side) an empty string would
+    // wrongly substring-match any reply at all.
+    const distinctOrganizations = Array.from(
+      new Set(matches.map((match) => match.organization).filter((organization) => organization !== "")),
+    );
+    if (distinctOrganizations.length > 1) {
+      throw new AmbiguousParticipantError(selector.name, distinctOrganizations);
+    }
+    throw new Error(`Participant name is ambiguous: ${selector.name}.`);
+  }
+
+  const matchedRow = matches[0] as { row: Locator; organization: string };
+  const addControl = matchedRow.row.locator("td.co-sel-button").getByText("追加", { exact: true });
+  if ((await addControl.count()) !== 1) throw new Error(`Add control was not found for: ${selector.name}`);
+  await addControl.click({ noWaitAfter: true });
+  await page.waitForTimeout(350);
+}
+
+async function waitForResultsToRefresh(
+  resultsTable: Locator,
+  previousHtml: string,
+  timeoutMs = 8_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await resultsTable.innerHTML()) !== previousHtml) return;
+    await new Promise((resolve) => setTimeout(resolve, 150));
   }
 }
 
@@ -589,6 +952,76 @@ async function assertPreparedBookingForm(page: Page, participantIds: string[]): 
   for (const participantId of participantIds) {
     if (!body.includes(participantId)) throw new Error(`Prepared form is missing ${participantId}.`);
   }
+}
+
+/**
+ * Reuses the pending DeskNet's form only when it is still open and contains
+ * the expected participants. A user may close that form, return to the saved
+ * candidates, and choose another slot; a different/stale form may also be
+ * visible after manual browser interaction. In either case, rebuild the form
+ * from the conversation context instead of failing the booking run.
+ */
+async function ensurePreparedBookingFormForCandidate(
+  page: Page,
+  pending: PendingBookingContext,
+  selectedDate: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const formIsVisible =
+    (await page.locator(".jsch-startdate:visible").count()) === 1;
+  if (formIsVisible) {
+    try {
+      await assertPreparedBookingForm(page, pending.participantIds);
+      await confirmRegistrationTargetDialogIfVisible(page);
+      return;
+    } catch {
+      // The visible form is stale or belongs to another selection. The
+      // schedule-list transition below safely discards it before rebuilding.
+    }
+  }
+
+  if (pending.participants === undefined) {
+    throw new Error(
+      "予約フォームが閉じられており、参加者情報が失われているため再作成できません。空き時間を再検索してください。",
+    );
+  }
+
+  await ensureScheduleList(page);
+  signal.throwIfAborted();
+  await openAvailabilityForm(page, {
+    type: "find_availability",
+    participants: pending.participants,
+    date: selectedDate,
+    endDate: selectedDate,
+    durationMinutes: pending.durationMinutes,
+  });
+  await assertPreparedBookingForm(page, pending.participantIds);
+  await confirmRegistrationTargetDialogIfVisible(page);
+}
+
+/**
+ * openAvailabilityForm intentionally leaves the registration-target dialog
+ * open while availability is inspected. A reconstructed booking form does
+ * not perform that inspection, so it must commit the selected participants
+ * before fillBookingForm can click the facility chooser behind the dialog.
+ * This also recovers a dialog left visible by an earlier interrupted retry.
+ */
+async function confirmRegistrationTargetDialogIfVisible(
+  page: Page,
+): Promise<void> {
+  const dialog = page.locator(".ui-dialog.co-sel-dialog:visible");
+  const count = await dialog.count();
+  if (count === 0) return;
+  if (count !== 1) {
+    throw new Error(`Expected at most one visible 登録先 dialog, found ${count}.`);
+  }
+  const ok = dialog.getByText("OK", { exact: true });
+  if ((await ok.count()) !== 1) {
+    throw new Error("登録先 dialog OK button was not found.");
+  }
+  await ok.click({ noWaitAfter: true });
+  await dialog.waitFor({ state: "hidden", timeout: 5_000 });
+  await page.waitForTimeout(300);
 }
 
 async function assertBookingFormMatches(
@@ -716,7 +1149,14 @@ function locateVisibleDialog(page: Page, label: string): Locator {
 
 async function confirmFinalRegistrationIfNeeded(page: Page): Promise<void> {
   const dialog = page.locator(".ui-dialog:visible").filter({ hasText: "確認" });
-  if ((await dialog.count()) !== 1) return;
+  try {
+    await dialog.waitFor({ state: "visible", timeout: 2_000 });
+  } catch {
+    return;
+  }
+  if ((await dialog.count()) !== 1) {
+    throw new Error("DeskNet'sの最終確認ダイアログが複数表示されています。");
+  }
   const yes = dialog.getByText("はい", { exact: true });
   if ((await yes.count()) !== 1) throw new Error("Final confirmation dialog is missing Yes.");
   await yes.click({ noWaitAfter: true });
@@ -736,8 +1176,13 @@ async function verifyCreatedAppointment(
     .locator('a[href*="schreferdtl"]:visible')
     .filter({ hasText: title })
     .filter({ hasText: expectedTime });
-  if ((await candidates.count()) !== 1) return false;
-  await candidates.click({ noWaitAfter: true });
+  const appointmentHref = resolveUniqueAppointmentHref(
+    await candidates.evaluateAll((links) =>
+      links.map((link) => link.getAttribute("href")),
+    ),
+  );
+  if (appointmentHref === undefined) return false;
+  await candidates.first().click({ noWaitAfter: true });
   await page.waitForTimeout(600);
   const detail = await page.locator("body").innerText();
   return (
@@ -747,7 +1192,7 @@ async function verifyCreatedAppointment(
   );
 }
 
-function formatAvailabilityMessage(
+export function formatAvailabilityMessage(
   date: string,
   endDate: string,
   durationMinutes: number,
@@ -905,17 +1350,35 @@ async function discardPreparedForm(page: Page): Promise<void> {
     }
   }
 
-  const formCancel = page.locator("input.jco-input-list-page:visible").first();
-  if ((await formCancel.count()) !== 1) return;
-  await formCancel.click();
-  await page.waitForTimeout(400);
-  const confirmation = page.locator(".ui-dialog:visible").filter({ hasText: "確認" });
-  if ((await confirmation.count()) === 1) {
-    await confirmation.getByRole("button", { name: "はい", exact: true }).click();
+  // Do not depend on a generic CSS class or button order. Identify the
+  // non-destructive control explicitly by its accessible name.
+  const formCancel = page
+    .getByRole("button", { name: "キャンセル", exact: true })
+    .filter({ visible: true })
+    .first();
+  if ((await formCancel.count()) !== 1) {
+    if ((await page.locator(".jsch-startdate:visible").count()) === 1) {
+      throw new Error("The unsaved schedule form is open, but its Cancel button was not found.");
+    }
+    return;
   }
-  await page
-    .locator(".jsch-startdate:visible")
-    .waitFor({ state: "hidden", timeout: 5_000 });
+  await formCancel.click({ noWaitAfter: true });
+
+  const visibleForm = page.locator(".jsch-startdate:visible");
+  const confirmationYes = page
+    .locator(".ui-dialog:visible")
+    .getByRole("button", { name: "はい", exact: true });
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if ((await visibleForm.count()) === 0) return;
+    if ((await confirmationYes.count()) === 1) {
+      await confirmationYes.click({ noWaitAfter: true });
+      await visibleForm.waitFor({ state: "hidden", timeout: 10_000 });
+      return;
+    }
+    await page.waitForTimeout(100);
+  }
+  throw new Error("DeskNet's did not close the unsaved schedule form after Cancel.");
 }
 
 async function observe(

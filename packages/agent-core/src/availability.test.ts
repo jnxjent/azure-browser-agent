@@ -77,6 +77,40 @@ describe("findCommonAvailability", () => {
     assert.deepEqual(slots[0]?.participantIds, ["A", "B", "C"]);
   });
 
+  it("excludes every candidate overlapping a participant's partial-hour meetings", () => {
+    const slots = findCommonAvailability({
+      window: {
+        start: "2026-09-17T08:00:00+09:00",
+        end: "2026-09-17T18:00:00+09:00",
+      },
+      durationMinutes: 60,
+      incrementMinutes: 30,
+      schedules: [
+        {
+          participantId: "髙田",
+          busy: [
+            {
+              start: "2026-09-17T11:30:00+09:00",
+              end: "2026-09-17T13:30:00+09:00",
+            },
+            {
+              start: "2026-09-17T14:30:00+09:00",
+              end: "2026-09-17T15:00:00+09:00",
+            },
+          ],
+        },
+      ],
+    });
+
+    const labels = slots.map((slot) =>
+      `${new Date(slot.start).toLocaleTimeString("ja-JP", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit" })}-${new Date(slot.end).toLocaleTimeString("ja-JP", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit" })}`,
+    );
+    assert.equal(labels.includes("12:00-13:00"), false);
+    assert.equal(labels.includes("14:00-15:00"), false);
+    assert.equal(labels.includes("13:30-14:30"), true);
+    assert.equal(labels.includes("15:00-16:00"), true);
+  });
+
   it("supports rolling candidates and merges overlapping busy intervals", () => {
     const slots = findCommonAvailability({
       window: {
@@ -225,6 +259,54 @@ describe("findBookableAvailability", () => {
           availableFacilityIds: ["Room 1"],
         },
       ],
+    );
+  });
+
+  it("keeps only facilities matching the user's location filter", () => {
+    const slots = findBookableAvailability({
+      window: {
+        start: "2026-09-17T09:00:00+09:00",
+        end: "2026-09-17T10:00:00+09:00",
+      },
+      durationMinutes: 60,
+      schedules: [{ participantId: "髙田", busy: [] }],
+      facilities: [
+        { facilityId: "アクト大会議室", busy: [] },
+        { facilityId: "アクトミーティングルームC", busy: [] },
+        { facilityId: "有玉大会議室", busy: [] },
+        { facilityId: "7180プリウス（アクト総務）", busy: [] },
+      ],
+      facilityQuery: "アクト",
+    });
+
+    assert.deepEqual(slots[0]?.availableFacilityIds, [
+      "アクト大会議室",
+      "アクトミーティングルームC",
+    ]);
+  });
+
+  it("distinguishes 奥山 from the more specific 奥山の杜CC location", () => {
+    const request = {
+      window: {
+        start: "2026-09-17T09:00:00+09:00",
+        end: "2026-09-17T10:00:00+09:00",
+      },
+      durationMinutes: 60,
+      schedules: [{ participantId: "髙田", busy: [] }],
+      facilities: [
+        { facilityId: "奥山応接室(1階)", busy: [] },
+        { facilityId: "奥山会議室(2階)", busy: [] },
+        { facilityId: "奥山の杜CC", busy: [] },
+      ],
+    };
+
+    assert.deepEqual(
+      findBookableAvailability({ ...request, facilityQuery: "奥山" })[0]?.availableFacilityIds,
+      ["奥山応接室(1階)", "奥山会議室(2階)"],
+    );
+    assert.deepEqual(
+      findBookableAvailability({ ...request, facilityQuery: "奥山の杜CC" })[0]?.availableFacilityIds,
+      ["奥山の杜CC"],
     );
   });
 

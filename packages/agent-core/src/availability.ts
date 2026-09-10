@@ -27,6 +27,7 @@ export interface CommonAvailabilitySlot extends TimeInterval {
 
 export interface BookableAvailabilityRequest extends CommonAvailabilityRequest {
   facilities: FacilitySchedule[];
+  facilityQuery?: string;
 }
 
 export interface BookableAvailabilitySlot extends CommonAvailabilitySlot {
@@ -39,6 +40,20 @@ interface NumericInterval {
 }
 
 const MINUTE_MS = 60_000;
+const KNOWN_FACILITY_LOCATIONS = [
+  "ミダックこなん",
+  "奥山の杜CC",
+  "浜名湖CC",
+  "遠州CC",
+  "御殿山",
+  "富士宮",
+  "名古屋",
+  "アクト",
+  "有玉",
+  "品川",
+  "奥山",
+  "都田",
+].map(normalizeFacilityName).sort((left, right) => right.length - left.length);
 
 export function filterFutureAvailability<T extends TimeInterval>(
   slots: T[],
@@ -142,12 +157,19 @@ export function findBookableAvailability(
     throw new TypeError("facilityId values must be unique.");
   }
 
+  const normalizedFacilityQuery = request.facilityQuery === undefined
+    ? undefined
+    : normalizeFacilityName(readIdentifier(request.facilityQuery, "facilityQuery"));
   const facilities = request.facilities.map((facility) => ({
     facilityId: readIdentifier(facility.facilityId, "facilityId"),
     busy: facility.busy.map((interval, index) =>
       parseInterval(interval, `${facility.facilityId}.busy[${index}]`),
     ),
-  }));
+  })).filter(
+    (facility) =>
+      normalizedFacilityQuery === undefined ||
+      matchesFacilityQuery(facility.facilityId, normalizedFacilityQuery),
+  );
 
   return findCommonAvailability(request).flatMap((slot) => {
     const candidate = parseInterval(slot, "candidate slot");
@@ -190,6 +212,24 @@ function readIdentifier(value: string, label: string): string {
     throw new TypeError(`${label} must be a non-empty string.`);
   }
   return identifier;
+}
+
+function normalizeFacilityName(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/g, "").toUpperCase();
+}
+
+function matchesFacilityQuery(
+  facilityId: string,
+  normalizedQuery: string,
+): boolean {
+  const normalizedFacilityId = normalizeFacilityName(facilityId);
+  if (KNOWN_FACILITY_LOCATIONS.includes(normalizedQuery)) {
+    const facilityLocation = KNOWN_FACILITY_LOCATIONS.find((location) =>
+      normalizedFacilityId.startsWith(location),
+    );
+    return facilityLocation === normalizedQuery;
+  }
+  return normalizedFacilityId.includes(normalizedQuery);
 }
 
 function mergeIntervals(intervals: NumericInterval[]): NumericInterval[] {
