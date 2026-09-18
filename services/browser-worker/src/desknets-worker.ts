@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   assertActionAllowed,
@@ -26,9 +26,14 @@ import {
   extractParticipantSchedules,
   mergeParticipantScheduleObservations,
 } from "./desknets-dom.js";
-import { resolveUniqueAppointmentHref } from "./desknets-appointments.js";
 import { keepMeetingRoomFacilities } from "./desknets-facilities.js";
-import { resolveSelfOrganizationParticipants } from "./desknets-participants.js";
+import { resolveSelfOrganizationParticipants, preferParticipantOrganization } from "./desknets-participants.js";
+import { readCompanyHolidays } from "./desknets-holidays.js";
+import { readMeetingHours } from "./meeting-hours.js";
+import { resolveLiveRoomChange } from "./room-change.js";
+import { ensureSingleDeskNetsTab } from "./desknets-tabs.js";
+import { openFacilityDialog } from "./desknets-facility-dialog.js";
+import { assertFacilityAvailable } from "./desknets-facility-conflicts.js";
 
 interface DeskNetsWorkerOptions {
   cdpEndpoint?: string;
@@ -41,6 +46,7 @@ export class DeskNetsBrowserWorker implements RunExecutor {
   private readonly cdpEndpoint: string;
   private readonly limits: RunLimits;
   private browserConnection: Promise<Browser> | undefined;
+  private scheduleUrl: string | undefined;
 
   constructor(options: DeskNetsWorkerOptions = {}) {
     this.cdpEndpoint =
@@ -69,9 +75,25 @@ export class DeskNetsBrowserWorker implements RunExecutor {
     let page: Page | undefined;
     let preservePreparedForm = false;
     try {
-      page = await findSingleDeskNetsPage(browser, this.limits);
+      if (run.task === undefined) {
+        throw new Error("DeskNet's run does not contain a structured task.");
+      }
+      page = await ensureSingleDeskNetsTab(browser, this.limits.allowedDomains);
+      if (page === undefined) {
+        const startUrl = this.scheduleUrl ?? process.env.DESKNETS_START_URL;
+        if (!startUrl) throw new Error("専用EdgeでDeskNet'sのスケジュール画面を開いてください。");
+        assertActionAllowed({ type: "open_page", url: startUrl }, this.limits);
+        const browserContext = browser.contexts()[0];
+        if (!browserContext) throw new Error("DeskNet's専用ブラウザのセッションがありません。");
+        page = await browserContext.newPage();
+        await page.goto(startUrl, { waitUntil: "domcontentloaded" });
+      }
       const pageUrl = new URL(page.url());
       assertActionAllowed({ type: "open_page", url: pageUrl.href }, this.limits);
+      const scheduleUrl = new URL(pageUrl);
+      scheduleUrl.search = "?cmd=schindex";
+      scheduleUrl.hash = "cmd=schweekgrp";
+      this.scheduleUrl = scheduleUrl.href;
       if (run.task?.type === "find_availability") {
         const completed = await executeAvailabilityRun({
           run,
@@ -105,7 +127,7 @@ export class DeskNetsBrowserWorker implements RunExecutor {
       }
       throw new Error("DeskNet's run does not contain a supported structured task.");
     } finally {
-      if (page !== undefined && !preservePreparedForm) {
+      if (page !== undefined && !page.isClosed() && !preservePreparedForm) {
         await discardPreparedForm(page);
       }
     }
@@ -113,7 +135,7 @@ export class DeskNetsBrowserWorker implements RunExecutor {
 
   private async getBrowser(): Promise<Browser> {
     if (this.browserConnection === undefined) {
-      const connection = chromium.connectOverCDP(this.cdpEndpoint);
+      const connection = this.connectOrRecoverBrowser();
       this.browserConnection = connection;
       void connection
         .then((browser) => {
@@ -131,6 +153,45 @@ export class DeskNetsBrowserWorker implements RunExecutor {
     this.browserConnection = undefined;
     return this.getBrowser();
   }
+
+  private async connectOrRecoverBrowser(): Promise<Browser> {
+    try {
+      return await chromium.connectOverCDP(this.cdpEndpoint, { timeout: 10_000 });
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("ECONNREFUSED")) throw error;
+      if (process.platform !== "win32") {
+        throw new Error("DeskNet's専用ブラウザに接続できません。専用Edgeを起動してください。", { cause: error });
+      }
+      const endpoint = new URL(this.cdpEndpoint);
+      assertLoopbackEndpoint(this.cdpEndpoint);
+      const startUrl = this.scheduleUrl ?? process.env.DESKNETS_START_URL ??
+        "https://desknets.midac.jp/dneo/dneo.cgi?cmd=schindex#cmd=schweekgrp";
+      assertActionAllowed({ type: "open_page", url: startUrl }, this.limits);
+      const profile = resolve(import.meta.dirname, "../../..", ".auth", "desknets-edge-cdp-profile");
+      await mkdir(profile, { recursive: true });
+      const edge = spawn(process.env.EDGE_EXECUTABLE_PATH ??
+        "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe", [
+        "--remote-debugging-address=127.0.0.1",
+        `--remote-debugging-port=${endpoint.port || "80"}`,
+        `--user-data-dir=${profile}`,
+        startUrl,
+      ], { detached: true, stdio: "ignore", windowsHide: false });
+      let startupError: Error | undefined;
+      edge.on("error", (cause) => { startupError = cause; });
+      edge.unref();
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline && startupError === undefined) {
+        const ready = await fetch(new URL("/json/version", endpoint), {
+          signal: AbortSignal.timeout(1_000),
+        }).then((response) => response.ok).catch(() => false);
+        if (ready) {
+          return await chromium.connectOverCDP(this.cdpEndpoint, { timeout: 10_000 });
+        }
+        await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+      }
+      throw new Error("DeskNet's専用Edgeを起動できませんでした。npm run auth:desknets で専用Edgeを起動し、認証してください。", { cause: startupError ?? error });
+    }
+  }
 }
 
 interface DeskNetsExecutionContext {
@@ -146,6 +207,7 @@ async function executeAvailabilityRun(
   context: DeskNetsExecutionContext & { task: FindAvailabilityTask },
 ): Promise<BrowserRun> {
   const { run, task: requestedTask, page, signal, limits, artifactDirectory, startedAt } = context;
+  const meetingHours = readMeetingHours();
   await ensureScheduleList(page);
   signal.throwIfAborted();
   // Read the requester's own department once, while the schedule list (not an
@@ -158,6 +220,7 @@ async function executeAvailabilityRun(
     participants: resolveSelfOrganizationParticipants(
       requestedTask.participants,
       userOrganization,
+      run.input.prompt,
     ),
   };
   await ensureScheduleList(page);
@@ -165,6 +228,7 @@ async function executeAvailabilityRun(
   const action: BrowserAction = { type: "click", target: "利用設備" };
   assertActionAllowed(action, limits, "read");
   const dates = enumerateDates(task.date, task.endDate);
+  const holidays = await readCompanyHolidays(page, dates);
   const participantAvailability: BookableAvailabilitySlot[] = [];
   const availability: BookableAvailabilitySlot[] = [];
   const allFacilityAvailability: BookableAvailabilitySlot[] = [];
@@ -218,6 +282,12 @@ async function executeAvailabilityRun(
       throw error;
     }
     const dayStart = `${date}T00:00:00+09:00`;
+    if (holidays.has(date)) {
+      const end = new Date(Date.parse(dayStart) + 86_400_000).toISOString();
+      participantSchedules = participantSchedules.map(schedule => ({
+        ...schedule, busy: [...schedule.busy, { start: dayStart, end }],
+      }));
+    }
     participantRowCount = participantSchedules.length;
     if (participantRowCount !== task.participants.length + 1) {
       throw new Error(`Expected ${task.participants.length + 1} participant rows, found ${participantRowCount}.`);
@@ -268,7 +338,7 @@ async function executeAvailabilityRun(
     await cancelVisibleDialog(page, "利用設備");
 
     const availabilityRequest = {
-      window: { start: `${date}T08:00:00+09:00`, end: `${date}T18:00:00+09:00` },
+      window: { start: `${date}T${meetingHours.start}:00+09:00`, end: `${date}T${meetingHours.end}:00+09:00` },
       durationMinutes: task.durationMinutes,
       incrementMinutes: 30,
       schedules: participantSchedules,
@@ -280,15 +350,18 @@ async function executeAvailabilityRun(
         availableFacilityIds: [],
       })),
     );
-    availability.push(...filterFutureAvailability(findBookableAvailability({
+    const filteredAvailability = filterFutureAvailability(findBookableAvailability({
       ...availabilityRequest,
       facilities: facilitySchedules,
-    })));
+    }));
+    availability.push(...filteredAvailability);
     const { facilityQuery: _facilityQuery, ...companyWideRequest } = availabilityRequest;
-    allFacilityAvailability.push(...filterFutureAvailability(findBookableAvailability({
+    allFacilityAvailability.push(...(task.facilityQuery === undefined
+      ? filteredAvailability
+      : filterFutureAvailability(findBookableAvailability({
       ...companyWideRequest,
       facilities: facilitySchedules,
-    })));
+    }))));
     assertWithinDuration(startedAt, limits.maxRunDurationMs);
     signal.throwIfAborted();
   }
@@ -299,6 +372,7 @@ async function executeAvailabilityRun(
   signal.throwIfAborted();
 
   const pendingBooking = {
+    ...(task.selectionMode === undefined ? {} : { selectionMode: task.selectionMode }),
     date: task.date,
     endDate: task.endDate,
     durationMinutes: task.durationMinutes,
@@ -333,7 +407,7 @@ async function executeAvailabilityRun(
         task.date,
         task.endDate,
         task.durationMinutes,
-        participantAvailability,
+        availability,
       ),
       evidence: [
         observationBefore.screenshotRef,
@@ -351,12 +425,34 @@ async function executeAvailabilityRun(
 async function executeBookingRun(
   context: DeskNetsExecutionContext & { task: BookMeetingTask },
 ): Promise<BrowserRun> {
-  const { run, task, page, signal, limits, artifactDirectory } = context;
-  const pending = run.context;
+  const { task, page, signal, limits, artifactDirectory } = context;
+  let run = context.run;
+  let pending = run.context;
   if (pending === undefined) throw new Error("Pending booking context is missing.");
 
   if (task.facilityQuery === undefined) {
     throw new Error("Agent API must resolve a concrete facility before dispatching a booking run.");
+  }
+  if (task.facilityOnlyChange) {
+    if (!task.selectedStart || !task.selectedEnd) throw new Error("変更する会議の日時がありません。");
+    if (Date.parse(task.selectedStart) < Date.now()) throw new Error("開始時刻を過ぎています。候補を再検索してください。");
+    const date = japanDateFromInstant(task.selectedStart);
+    await ensurePreparedBookingFormForCandidate(page, pending, date, signal);
+    await openFacilityDialog(page);
+    const schedules = keepMeetingRoomFacilities(deduplicateFacilitySchedules(await extractFacilitySchedules(page.locator("body"), `${date}T00:00:00+09:00`)));
+    await cancelVisibleDialog(page, "利用設備");
+    const live = resolveLiveRoomChange(schedules, {start:task.selectedStart,end:task.selectedEnd}, task.facilityQuery,
+      task.facilityScope, task.excludePreviousFacility ? task.previousFacilityId : undefined);
+    const selected = {start:task.selectedStart,end:task.selectedEnd,participantIds:pending.participantIds,
+      durationMinutes:pending.durationMinutes,availableFacilityIds:live.available};
+    const replaceSlot = (slots: BookableAvailabilitySlot[]) => [...slots.filter(s=>s.start!==selected.start || s.end!==selected.end),selected];
+    pending = {...pending, availability:replaceSlot(pending.availability), allFacilityAvailability:replaceSlot(pending.allFacilityAvailability ?? pending.availability)};
+    run = {...run,context:pending};
+    if (!live.facilityId) return {...run,status:"awaiting_user_input",updatedAt:new Date().toISOString(),result:{
+      summary:"Checked the requested room at the saved meeting time.",assistantMessage:live.message,
+      evidence:[`Room timelines checked for ${date}`],facilityAlternatives:live.alternatives,
+    }};
+    task.facilityQuery = live.facilityId;
   }
   const facilityId = resolveFacility(task.facilityQuery, pending.availability);
   const slot = pending.availability.find(
@@ -379,7 +475,8 @@ async function executeBookingRun(
   const selectedDate = japanDateFromInstant(slot.start);
 
   if (run.approval?.approvedAt !== undefined) {
-    await ensurePreparedBookingFormForCandidate(page, pending, selectedDate, signal);
+    const rebuilt = await ensurePreparedBookingFormForCandidate(page, pending, selectedDate, signal);
+    if (rebuilt) await fillBookingForm(page, task, slot, facilityId, selectedDate);
     await page.locator('input[name="detail"]:visible').fill(task.title);
     await assertBookingFormMatches(
       page,
@@ -389,62 +486,50 @@ async function executeBookingRun(
       selectedDate,
       pending.participantIds,
     );
+    await openFacilityDialog(page);
+    await verifyLiveFacilityAvailability(page, facilityId, slot, selectedDate);
+    await cancelVisibleDialog(page, "利用設備");
+    signal.throwIfAborted();
     const observationBefore = await observe(
       page,
       run.id,
       "before.png",
       artifactDirectory,
-      "Verified the prepared DeskNet's booking form immediately before final approved registration.",
-      ["Meeting title", "Date and time", "Participants", "Facility", "Email notification", "追加"],
+      "Verified the prepared DeskNet's booking form before handing final registration to the user.",
+      ["Meeting title", "Date and time", "Participants", "Facility", "Email notification"],
     );
-    const addAction: BrowserAction = { type: "click", target: "追加" };
-    assertActionAllowed(addAction, limits, "write", true);
-    await clickFinalRegistration(page);
-    const verified = await verifyCreatedAppointment(
-      page,
-      task.title,
-      slot,
-      facilityId,
-      pending.participantIds,
-    );
-    if (!verified) {
-      throw new Error("DeskNet'sへの予定登録を確認できませんでした。");
-    }
-    const observationAfter = await observe(
-      page,
-      run.id,
-      "after.png",
-      artifactDirectory,
-      "Verified the newly registered DeskNet's appointment.",
-      ["Meeting title", "Date and time", "Participants", "Facility"],
-    );
+    const foregroundShown = await bringPreparedFormToFront(page);
+    const handoffAction: BrowserAction = { type: "wait", milliseconds: 0 };
     return {
       ...run,
-      status: "completed",
+      status: "awaiting_user_input",
       updatedAt: new Date().toISOString(),
       steps: [
         ...run.steps,
         {
           sequence: run.steps.length + 1,
           observationBefore,
-          reasoning: "The authenticated AzureChat user explicitly approved this exact booking proposal.",
-          action: addAction,
-          observationAfter,
+          reasoning:
+            "The authenticated AzureChat user approved opening the prepared form; final registration remains a manual DeskNet's action.",
+          action: handoffAction,
+          observationAfter: observationBefore,
           verified: true,
         },
       ],
       result: {
-        summary: "Registered and verified the DeskNet's appointment after explicit approval.",
-        assistantMessage: "DeskNet'sへの予定登録が完了しました。",
-        evidence: [observationBefore.screenshotRef, observationAfter.screenshotRef],
-        booking: {
+        summary: "Displayed the prepared DeskNet's form for manual final confirmation.",
+        assistantMessage: foregroundShown
+          ? "DeskNet'sの予定追加画面を表示しました。内容を確認し、DeskNet's上の「追加」を手動で押してください。Agentは予定を登録していません。"
+          : "DeskNet'sの予定追加画面を準備しました。専用EdgeをAlt + Tabで表示し、内容を確認して「追加」を手動で押してください。Agentは予定を登録していません。",
+        evidence: [observationBefore.screenshotRef],
+        manualActionRequest: {
           title: task.title,
           start: slot.start,
           end: slot.end,
           participantIds: pending.participantIds,
           facilityId,
-          emailNotificationConfigured: task.sendEmail,
-          verified: true,
+          emailNotificationWillBeSent: task.sendEmail,
+          selfNotificationSuppressed: false,
         },
       },
     };
@@ -458,6 +543,17 @@ async function executeBookingRun(
   );
 
   await fillBookingForm(page, task, slot, facilityId, selectedDate);
+  if (task.facilityOnlyChange) {
+    await assertBookingFormMatches(page, task, slot, facilityId, selectedDate, pending.participantIds);
+    const observation = await observe(page,run.id,"after.png",artifactDirectory,"Changed only the room; preserved the saved meeting.",["Date and time","Participants","Facility"]);
+    await bringPreparedFormToFront(page);
+    return {...run,status:"awaiting_user_input",updatedAt:new Date().toISOString(),result:{
+      summary:"Displayed the changed room for manual final confirmation.",
+      assistantMessage:"日時・参加者・会議時間を引き継ぎ、会議室を変更したDeskNet's画面を表示しました。最終登録はDeskNet'sの「追加」を手動で押してください。",
+      evidence:[observation.screenshotRef],manualActionRequest:{title:task.title,start:slot.start,end:slot.end,
+        participantIds:pending.participantIds,facilityId,emailNotificationWillBeSent:task.sendEmail,selfNotificationSuppressed:false},
+    }};
+  }
 
   const observationBefore = await observe(
     page,
@@ -495,7 +591,7 @@ async function executeBookingRun(
     ],
     result: {
       summary: "Prepared the DeskNet's booking form and requested explicit AzureChat approval.",
-      assistantMessage: "以下の内容を確認し、AzureChatの「確定してDeskNet'sに登録」ボタンを押してください。ボタンを押すまで予定は登録されません。",
+      assistantMessage: `以下の内容を確認し、AzureChatのオレンジのボタンを押してください。DeskNet'sの予定追加画面を表示します。メール送信は${task.sendEmail ? "オン" : "オフ"}、本人への通知はオンです。DeskNet's上の「追加」を手動で押すまで予定は登録されません。`,
       evidence: [observationBefore.screenshotRef],
       approvalRequest: {
         title: task.title,
@@ -509,40 +605,22 @@ async function executeBookingRun(
   };
 }
 
-async function clickFinalRegistration(page: Page): Promise<void> {
-  const candidates = page.getByText("追加", { exact: true });
-  let visibleButton: Locator | undefined;
-  for (let index = 0; index < (await candidates.count()); index += 1) {
-    const candidate = candidates.nth(index);
-    if (await candidate.isVisible()) {
-      visibleButton = candidate;
-      break;
-    }
-  }
-  if (visibleButton === undefined) {
-    throw new Error("DeskNet'sの追加ボタンが見つかりません。");
-  }
-  await visibleButton.click({ noWaitAfter: true });
-  await confirmFinalRegistrationIfNeeded(page);
-}
-
-async function bringPreparedFormToFront(page: Page): Promise<boolean> {
+export async function bringPreparedFormToFront(page: Page): Promise<boolean> {
   await page.bringToFront();
   if (process.platform !== "win32") return true;
 
-  const processIdPath = resolve(
-    import.meta.dirname,
-    "../../..",
-    ".auth",
-    "desknets-edge.pid",
-  );
-  let processId: number;
+  // Query the connected browser, since Edge can restart and invalidate PID files.
+  const browser = page.context().browser();
+  if (browser === null) return false;
+  const session = await browser.newBrowserCDPSession();
+  let processId: number | undefined;
   try {
-    processId = Number.parseInt((await readFile(processIdPath, "utf8")).trim(), 10);
-  } catch {
-    return false;
+    const processes = await session.send("SystemInfo.getProcessInfo");
+    processId = processes.processInfo.find((entry) => entry.type === "browser")?.id;
+  } finally {
+    await session.detach();
   }
-  if (!Number.isInteger(processId) || processId <= 0) return false;
+  if (processId === undefined || !Number.isInteger(processId) || processId <= 0) return false;
 
   const script = `
 Add-Type -TypeDefinition @'
@@ -551,6 +629,10 @@ using System.Runtime.InteropServices;
 public static class DeskNetsWindowFocus {
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
 }
 '@
 $targetProcessId = [int]$env:DESKNETS_EDGE_PROCESS_ID
@@ -560,7 +642,17 @@ if ($target.MainWindowHandle -eq 0) { exit 2 }
 $shell = New-Object -ComObject WScript.Shell
 [void]$shell.AppActivate($targetProcessId)
 Start-Sleep -Milliseconds 100
-if ([DeskNetsWindowFocus]::SetForegroundWindow($target.MainWindowHandle)) { exit 0 }
+[void][DeskNetsWindowFocus]::SetForegroundWindow($target.MainWindowHandle)
+if ([DeskNetsWindowFocus]::GetForegroundWindow() -eq $target.MainWindowHandle) { exit 0 }
+$currentThread = [DeskNetsWindowFocus]::GetCurrentThreadId()
+$foregroundThread = [DeskNetsWindowFocus]::GetWindowThreadProcessId([DeskNetsWindowFocus]::GetForegroundWindow(), [IntPtr]::Zero)
+$attached = [DeskNetsWindowFocus]::AttachThreadInput($currentThread, $foregroundThread, $true)
+try {
+  [void][DeskNetsWindowFocus]::SetForegroundWindow($target.MainWindowHandle)
+} finally {
+  if ($attached) { [void][DeskNetsWindowFocus]::AttachThreadInput($currentThread, $foregroundThread, $false) }
+}
+if ([DeskNetsWindowFocus]::GetForegroundWindow() -eq $target.MainWindowHandle) { exit 0 }
 exit 3
 `;
   const encodedScript = Buffer.from(script, "utf16le").toString("base64");
@@ -586,7 +678,7 @@ exit 3
   return result.kind === "exit" && result.code === 0;
 }
 
-async function ensureScheduleList(page: Page): Promise<void> {
+export async function ensureScheduleList(page: Page): Promise<void> {
   if ((await page.locator(".jsch-startdate:visible").count()) === 1) {
     await discardPreparedForm(page);
   }
@@ -598,10 +690,23 @@ async function ensureScheduleList(page: Page): Promise<void> {
       "DeskNet's専用Edgeが未ログインです。専用Edgeで手動ログインし、スケジュール画面が表示されてから再実行してください。",
     );
   }
-  await page.getByText("氏名/組織名", { exact: true }).filter({ visible: true }).first().waitFor({
-    state: "visible",
-    timeout: 10_000,
-  });
+  const marker = page.getByText("氏名/組織名", { exact: true }).filter({ visible: true }).first();
+  if (await marker.count() === 0) {
+    // Cancel may return to equipment reservations, a personal calendar or the
+    // portal. None exposes the group schedule's participant-selection header.
+    const url = new URL(page.url());
+    url.search = "?cmd=schindex";
+    url.hash = "cmd=schweekgrp";
+    // Force a document navigation even when only the hash differs, avoiding
+    // stale asynchronous DeskNet's route updates.
+    await page.goto(url.origin + url.pathname + url.search, {waitUntil:"load"});
+    await page.goto(url.href, {waitUntil:"load"});
+  }
+  try {
+    await marker.waitFor({state:"visible",timeout:10_000});
+  } catch (cause) {
+    throw new Error("DeskNet'sのスケジュール（組織週間）画面に戻れませんでした。専用Edgeのログイン状態と画面を確認してください。", {cause});
+  }
 }
 
 interface CurrentUserProfile {
@@ -773,28 +878,25 @@ async function selectParticipant(
   await page.waitForTimeout(300);
 
   const rows = resultsTable.locator("tbody tr");
-  const rowCount = await rows.count();
-  const nameMatches: Array<{ row: Locator; organization: string }> = [];
-  for (let index = 0; index < rowCount; index += 1) {
-    const row = rows.nth(index);
-    const nameSpan = row.locator("span.co-sel-name");
-    if ((await nameSpan.count()) !== 1) continue;
-    // DeskNet's displays the full "surname+given name" with no separator, while
-    // Japanese requests typically name only the surname (e.g. "甲斐さん"), so the
-    // requested name is expected to be a prefix of the displayed name.
-    if (!(await nameSpan.innerText()).trim().startsWith(selector.name)) continue;
-    const organizationSpan = row.locator("span.co-busyo-def");
-    const organization = (await organizationSpan.count()) === 1 ? (await organizationSpan.innerText()).trim() : "";
-    nameMatches.push({ row, organization });
-  }
+  // Read all results in one browser round trip, retaining row indices and
+  // exact matching semantics for the subsequent ambiguity checks.
+  const candidates = await rows.evaluateAll((elements) => elements.map((row, index) => {
+    const names = row.querySelectorAll<HTMLElement>("span.co-sel-name");
+    const organizations = row.querySelectorAll<HTMLElement>("span.co-busyo-def");
+    return {
+      index,
+      name: names.length === 1 ? names[0]!.innerText.trim() : null,
+      organization: organizations.length === 1 ? organizations[0]!.innerText.trim() : "",
+    };
+  }));
+  const nameMatches = candidates
+    .filter((candidate) => candidate.name?.startsWith(selector.name))
+    .map((candidate) => ({ row: rows.nth(candidate.index), organization: candidate.organization }));
 
   if (nameMatches.length === 0) {
     throw new Error(`Participant was not found: ${selector.name}`);
   }
-  const matches =
-    selector.organization === undefined
-      ? nameMatches
-      : nameMatches.filter((match) => match.organization.includes(selector.organization as string));
+  const matches = preferParticipantOrganization(nameMatches, selector);
   if (matches.length === 0) {
     throw new Error(
       `Participant ${selector.name} was found, but none belong to the requested organization: ${selector.organization}`,
@@ -845,24 +947,15 @@ async function openParticipantDialog(page: Page): Promise<void> {
 
 async function setFormDate(page: Page, date: string): Promise<void> {
   const displayDate = date.replaceAll("-", "/");
+  let changed = false;
   for (const selector of [".jsch-startdate:visible", ".jsch-enddate:visible"]) {
     const input = page.locator(selector);
+    if (await input.inputValue() === displayDate) continue;
     await input.fill(displayDate);
     await input.press("Tab");
+    changed = true;
   }
-  await page.waitForTimeout(300);
-}
-
-async function openFacilityDialog(page: Page): Promise<void> {
-  const chooser = page
-    .locator("a.jsch-entry-target-chooser:visible")
-    .filter({ hasText: "利用設備" });
-  if ((await chooser.count()) !== 1) throw new Error("Facility chooser was not found.");
-  await chooser.click({ noWaitAfter: true });
-  await page
-    .locator(".ui-dialog:visible .sch-entry-plant-reserve-list table tbody tr")
-    .first()
-    .waitFor({ state: "attached", timeout: 10_000 });
+  if (changed) await page.waitForTimeout(300);
 }
 
 async function fillBookingForm(
@@ -887,6 +980,7 @@ async function fillBookingForm(
   await page.locator('input[name="detail"]:visible').fill(task.title);
 
   await openFacilityDialog(page);
+  await verifyLiveFacilityAvailability(page, facilityId, slot, date);
   const dialog = locateVisibleDialog(page, "利用設備");
   await selectExactFacility(dialog, facilityId);
   await confirmVisibleDialog(page, "利用設備");
@@ -911,8 +1005,9 @@ async function fillBookingForm(
   }
 }
 
-async function selectExactFacility(dialog: Locator, facilityId: string): Promise<void> {
-  const room = dialog.getByText(facilityId, { exact: true });
+export async function selectExactFacility(dialog: Locator, facilityId: string): Promise<void> {
+  const rows = dialog.locator(".sch-entry-plant-reserve-list table tbody tr");
+  const room = rows.getByText(facilityId, { exact: true });
   if ((await room.count()) !== 1) throw new Error(`Facility row was not found: ${facilityId}`);
 
   const checkbox = room
@@ -920,6 +1015,27 @@ async function selectExactFacility(dialog: Locator, facilityId: string): Promise
     .locator('input[type="checkbox"]');
   if ((await checkbox.count()) !== 1) {
     throw new Error(`Facility checkbox was not found: ${facilityId}`);
+  }
+
+  // A booking has exactly one facility. Reusing a prepared form must replace
+  // its prior selection, not accumulate additional rooms.
+  const previousSelections = await rows.evaluateAll((elements, requested) => elements.flatMap((row, index) => {
+    const name = row.querySelector(".sch-entry-plant-name")?.textContent?.trim();
+    const selected = row.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked;
+    return selected && name !== requested ? [index] : [];
+  }), facilityId);
+  for (const index of previousSelections) {
+    const previous = rows.nth(index).locator('input[type="checkbox"]');
+    await previous.evaluate((element) => element.scrollIntoView({ block: "center", inline: "nearest" }));
+    try {
+      await previous.uncheck({ timeout: 3_000 });
+    } catch (error) {
+      await previous.evaluate((element) => {
+        const input = element as HTMLInputElement;
+        if (input.checked) input.click();
+      });
+      if (await previous.isChecked()) throw error;
+    }
   }
 
   // DeskNet's keeps the facility rows in a nested scrolling pane. Playwright's
@@ -932,7 +1048,6 @@ async function selectExactFacility(dialog: Locator, facilityId: string): Promise
   try {
     await checkbox.check({ timeout: 3_000 });
   } catch (error) {
-    if (await checkbox.isChecked()) return;
     await checkbox.evaluate((element) => {
       const input = element as HTMLInputElement;
       if (!input.checked) input.click();
@@ -941,6 +1056,12 @@ async function selectExactFacility(dialog: Locator, facilityId: string): Promise
   }
   if (!(await checkbox.isChecked())) {
     throw new Error(`Facility checkbox did not stay selected: ${facilityId}`);
+  }
+  const selectedNames = await rows.evaluateAll((elements) => elements
+    .filter((row) => row.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked)
+    .map((row) => row.querySelector(".sch-entry-plant-name")?.textContent?.trim()));
+  if (selectedNames.length !== 1 || selectedNames[0] !== facilityId) {
+    throw new Error("会議室を1件だけに変更できませんでした。利用設備の選択を確認してください。");
   }
 }
 
@@ -966,14 +1087,14 @@ async function ensurePreparedBookingFormForCandidate(
   pending: PendingBookingContext,
   selectedDate: string,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
   const formIsVisible =
     (await page.locator(".jsch-startdate:visible").count()) === 1;
   if (formIsVisible) {
     try {
       await assertPreparedBookingForm(page, pending.participantIds);
       await confirmRegistrationTargetDialogIfVisible(page);
-      return;
+      return false;
     } catch {
       // The visible form is stale or belongs to another selection. The
       // schedule-list transition below safely discards it before rebuilding.
@@ -997,6 +1118,7 @@ async function ensurePreparedBookingFormForCandidate(
   });
   await assertPreparedBookingForm(page, pending.participantIds);
   await confirmRegistrationTargetDialogIfVisible(page);
+  return true;
 }
 
 /**
@@ -1053,30 +1175,33 @@ async function assertBookingFormMatches(
     `${end.hour}時`,
     `${end.minute}分`,
   ];
-  const actualTimes = [
-    await hours.nth(0).locator("option:checked").innerText(),
-    await minutes.nth(0).locator("option:checked").innerText(),
-    await hours.nth(1).locator("option:checked").innerText(),
-    await minutes.nth(1).locator("option:checked").innerText(),
-  ];
+  const actualTimes = await Promise.all([
+    hours.nth(0).locator("option:checked").innerText(),
+    minutes.nth(0).locator("option:checked").innerText(),
+    hours.nth(1).locator("option:checked").innerText(),
+    minutes.nth(1).locator("option:checked").innerText(),
+  ]);
   if (actualTimes.some((value, index) => value.trim() !== expectedTimes[index])) {
     throw new Error("The prepared meeting time changed before approval.");
   }
 
   const body = await page.locator("body").innerText();
   if (!body.includes(facilityId)) throw new Error("The prepared facility changed before approval.");
-  const checkboxes = page.locator('input[type="checkbox"]:visible');
-  let emailIsChecked: boolean | undefined;
-  for (let index = 0; index < (await checkboxes.count()); index += 1) {
-    const checkbox = checkboxes.nth(index);
-    if ((await checkbox.locator("..").innerText()).trim() === "メール") {
-      emailIsChecked = await checkbox.isChecked();
-    }
-  }
+  const emailIsChecked = await page.locator('input[type="checkbox"]:visible').evaluateAll((elements) => {
+    const matches = elements.filter((element) => element.parentElement?.innerText.trim() === "メール");
+    return (matches.at(-1) as HTMLInputElement | undefined)?.checked;
+  });
   if (emailIsChecked === undefined) throw new Error("Email notification checkbox is missing.");
   if (emailIsChecked !== task.sendEmail) {
     throw new Error("Email notification choice changed before approval.");
   }
+}
+
+async function verifyLiveFacilityAvailability(
+  page: Page, facilityId: string, slot: BookableAvailabilitySlot, date: string,
+): Promise<void> {
+  const schedules = await extractFacilitySchedules(page.locator("body"), `${date}T00:00:00+09:00`);
+  assertFacilityAvailable(schedules, facilityId, slot);
 }
 
 function resolveFacility(
@@ -1147,80 +1272,16 @@ function locateVisibleDialog(page: Page, label: string): Locator {
   return page.locator(".ui-dialog:visible");
 }
 
-async function confirmFinalRegistrationIfNeeded(page: Page): Promise<void> {
-  const dialog = page.locator(".ui-dialog:visible").filter({ hasText: "確認" });
-  try {
-    await dialog.waitFor({ state: "visible", timeout: 2_000 });
-  } catch {
-    return;
-  }
-  if ((await dialog.count()) !== 1) {
-    throw new Error("DeskNet'sの最終確認ダイアログが複数表示されています。");
-  }
-  const yes = dialog.getByText("はい", { exact: true });
-  if ((await yes.count()) !== 1) throw new Error("Final confirmation dialog is missing Yes.");
-  await yes.click({ noWaitAfter: true });
-  await dialog.waitFor({ state: "hidden", timeout: 5_000 });
-}
-
-async function verifyCreatedAppointment(
-  page: Page,
-  title: string,
-  slot: BookableAvailabilitySlot,
-  facilityId: string,
-  participantIds: string[],
-): Promise<boolean> {
-  await page.waitForTimeout(800);
-  const expectedTime = `${formatJapanTime(slot.start)} - ${formatJapanTime(slot.end)}`;
-  const candidates = page
-    .locator('a[href*="schreferdtl"]:visible')
-    .filter({ hasText: title })
-    .filter({ hasText: expectedTime });
-  const appointmentHref = resolveUniqueAppointmentHref(
-    await candidates.evaluateAll((links) =>
-      links.map((link) => link.getAttribute("href")),
-    ),
-  );
-  if (appointmentHref === undefined) return false;
-  await candidates.first().click({ noWaitAfter: true });
-  await page.waitForTimeout(600);
-  const detail = await page.locator("body").innerText();
-  return (
-    detail.includes(title) &&
-    detail.includes(facilityId) &&
-    participantIds.every((participantId) => detail.includes(participantId))
-  );
-}
-
 export function formatAvailabilityMessage(
   date: string,
   endDate: string,
   durationMinutes: number,
   availability: BookableAvailabilitySlot[] | Array<{ start: string; end: string }>,
 ): string {
-  const ranges = availability
-    .map((slot) => ({ start: Date.parse(slot.start), end: Date.parse(slot.end) }))
-    .sort((left, right) => left.start - right.start);
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const interval of ranges) {
-    const previous = merged.at(-1);
-    if (previous === undefined || interval.start > previous.end) merged.push({ ...interval });
-    else previous.end = Math.max(previous.end, interval.end);
-  }
-  const dateLabel = date === endDate
-    ? `${Number.parseInt(date.slice(5, 7), 10)}月${Number.parseInt(date.slice(8, 10), 10)}日`
-    : `${Number.parseInt(date.slice(5, 7), 10)}月${Number.parseInt(date.slice(8, 10), 10)}日〜${Number.parseInt(endDate.slice(5, 7), 10)}月${Number.parseInt(endDate.slice(8, 10), 10)}日`;
-  if (merged.length === 0) {
-    return `${dateLabel}は、現在以降に${durationMinutes}分の打ち合わせを設定できる候補がありません。`;
-  }
-  const labels = merged.map((interval) => {
-    const start = new Date(interval.start).toISOString();
-    const end = new Date(interval.end).toISOString();
-    return date === endDate
-      ? `${formatJapanTime(start)}〜${formatJapanTime(end)}`
-      : `${formatJapanDateTime(start)}〜${formatJapanTime(end)}`;
-  });
-  return `はい。${dateLabel}は、現在以降では${labels.join("、")}の範囲で${durationMinutes}分の打ち合わせを設定可能です。日付を開いて候補を確認するか、日時・会議室・メール送信有無を直接指定してください。`;
+  const candidates = [...availability].sort((a, b) => Date.parse(a.start) - Date.parse(b.start)).slice(0, 50);
+  if (candidates.length === 0) return `${date}〜${endDate}は、現在以降に${durationMinutes}分の打ち合わせを設定できる候補がありません。`;
+  const lines = candidates.map((slot, index) => `${index + 1}. ${formatJapanDateTime(slot.start)}〜${formatJapanTime(slot.end)}（${durationMinutes}分）`);
+  return `${date}〜${endDate}の候補は開始時刻順です。${availability.length > 50 ? "先頭50件を表示します。" : ""}\n${lines.join("\n")}\n「では、1で」のように番号で選択してください。会議室は登録済みの優先順位、メール送信と本人への通知はオンを初期値にします。`;
 }
 
 function japanDateFromInstant(value: string): string {
@@ -1278,30 +1339,6 @@ function formatJapanDateTime(value: string): string {
   return `${date} ${formatJapanTime(value)}`;
 }
 
-async function findSingleDeskNetsPage(
-  browser: Browser,
-  limits: RunLimits,
-): Promise<Page> {
-  const pages = browser
-    .contexts()
-    .flatMap((context) => context.pages())
-    .filter((page) => {
-      try {
-        const hostname = new URL(page.url()).hostname.toLowerCase();
-        return limits.allowedDomains.some(
-          (domain) => hostname === domain || hostname.endsWith(`.${domain}`),
-        );
-      } catch {
-        return false;
-      }
-    });
-  if (pages.length !== 1) {
-    throw new Error(
-      `Expected exactly one allowed DeskNet's tab, found ${pages.length}. Close extra tabs before starting the run.`,
-    );
-  }
-  return pages[0] as Page;
-}
 
 function assertPreparedParticipantDialog(page: Page, pageUrl: URL): void {
   const hash = new URLSearchParams(pageUrl.hash.replace(/^#/, ""));
@@ -1338,7 +1375,7 @@ async function closeSelectionDialog(page: Page, label: string): Promise<void> {
   await page.waitForTimeout(300);
 }
 
-async function discardPreparedForm(page: Page): Promise<void> {
+export async function discardPreparedForm(page: Page): Promise<void> {
   const dialog = page.locator(".ui-dialog:visible");
   if ((await dialog.count()) === 1) {
     const cancel = dialog

@@ -20,8 +20,10 @@ function isSelfOrganizationReference(value: string | undefined): boolean {
 export function resolveSelfOrganizationParticipants(
   participants: ParticipantSelector[],
   currentUserOrganization: string | undefined,
+  prompt = "",
 ): ParticipantSelector[] {
-  if (!participants.some((participant) => isSelfOrganizationReference(participant.organization))) {
+  const selfDepartmentRequested = /当部|当部署|自部署|同じ部|自部門/.test(prompt);
+  if (!selfDepartmentRequested && !participants.some((participant) => isSelfOrganizationReference(participant.organization))) {
     return participants;
   }
 
@@ -33,8 +35,18 @@ export function resolveSelfOrganizationParticipants(
   }
 
   return participants.map((participant) =>
-    isSelfOrganizationReference(participant.organization)
-      ? { ...participant, organization }
+    (isSelfOrganizationReference(participant.organization) ||
+      participant.organization === undefined ||
+      (selfDepartmentRequested && participant.organization === organization))
+      ? { ...participant, organization, organizationFallback: true }
       : participant,
   );
+}
+
+export function preferParticipantOrganization<T extends { organization: string }>(
+  matches: T[], selector: ParticipantSelector,
+): T[] {
+  if (!selector.organization) return matches;
+  const local = matches.filter(match => match.organization.includes(selector.organization!));
+  return local.length === 0 && selector.organizationFallback ? matches : local;
 }

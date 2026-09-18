@@ -22,18 +22,16 @@ export function assertRunAllowed(run: BrowserRun, limits: RunLimits): void {
 export function assertActionAllowed(
   action: BrowserAction,
   limits: RunLimits,
-  mode: "read" | "write" = "read",
-  explicitlyApproved = false,
+  _mode: "read" | "write" = "read",
 ): void {
   if (
     action.type === "click" &&
     ["追加", "登録", "保存", "送信", "削除", "submit"].includes(
       action.target.trim().toLowerCase(),
-    ) &&
-    (mode !== "write" || !explicitlyApproved)
+    )
   ) {
     throw new PolicyViolationError(
-      `Explicit final approval is required for action: ${action.target}`,
+      `Final registration controls must be operated manually by the user: ${action.target}`,
     );
   }
 

@@ -4,8 +4,27 @@ import {
   facilityChangeFromStructuredCommand,
   mergeFacilityChangeRequests,
   parseExplicitFacilityQuery,
+  parseFlexibleFacilityQuery,
   parseFacilityChangeRequest,
+  parseAlternativeFacilityRequest,
 } from "./facility-change.js";
+
+describe("alternative room replies", () => {
+  it("treats a location's meeting rooms as any room there, not a literal room name", () => {
+    assert.deepEqual(parseFlexibleFacilityQuery("有玉の会議室"), {query:"有玉",facilityType:"meeting_room"});
+    assert.deepEqual(parseFlexibleFacilityQuery("アクトの会議室"), {query:"アクト",facilityType:"meeting_room"});
+    assert.equal(parseFlexibleFacilityQuery("有玉大会議室")?.query,"有玉大会議室");
+  });
+  it("interprets another room as a location scope plus an exclusion", () => {
+    for (const prompt of ["では、アクトの別会議室で  ", "アクトの別の会議室にして", "アクトの他の会議室で"]) {
+      assert.deepEqual(parseAlternativeFacilityRequest(prompt), {
+        preferredQuery: "アクト", preferredType: "meeting_room", excludePrevious: true,
+      });
+    }
+    assert.equal(parseAlternativeFacilityRequest("別の会議室で", "アクト")?.preferredQuery, "アクト");
+    assert.equal(parseAlternativeFacilityRequest("別の会議室で"), undefined);
+  });
+});
 
 describe("parseFacilityChangeRequest", () => {
   it("parses a preferred room and a location fallback across lines", () => {
@@ -88,6 +107,84 @@ describe("parseFacilityChangeRequest", () => {
     assert.deepEqual(
       parseFacilityChangeRequest("会議室をアクト応接室に変更して"),
       { preferredQuery: "アクト応接室" },
+    );
+  });
+
+  it("understands any available meeting room within a named location", () => {
+    assert.deepEqual(
+      parseFacilityChangeRequest("会議室は、有玉のどこかの会議室に変更して"),
+      {
+        preferredQuery: "有玉",
+        preferredType: "meeting_room",
+      },
+    );
+    assert.deepEqual(
+      parseFlexibleFacilityQuery("有玉で空いている会議室"),
+      {
+        query: "有玉",
+        facilityType: "meeting_room",
+      },
+    );
+    assert.deepEqual(
+      parseFlexibleFacilityQuery("有玉の会議室ならどこでもいい"),
+      {
+        query: "有玉",
+        facilityType: "meeting_room",
+      },
+    );
+  });
+
+  it("normalizes a model-produced natural facility phrase", () => {
+    assert.deepEqual(
+      facilityChangeFromStructuredCommand({
+        action: "change_facility",
+        participants: [],
+        dateStart: null,
+        dateEnd: null,
+        startTime: null,
+        endTime: null,
+        durationMinutes: null,
+        candidateNumber: null,
+        facility: {
+          preferred: "有玉のどこかの会議室",
+          fallbackLocation: null,
+          fallbackType: "meeting_room",
+          anyAvailable: true,
+        },
+        title: null,
+        sendEmail: null,
+      }),
+      {
+        preferredQuery: "有玉",
+        preferredType: "meeting_room",
+      },
+    );
+  });
+
+  it("accepts a location-only any-room structured command", () => {
+    assert.deepEqual(
+      facilityChangeFromStructuredCommand({
+        action: "change_facility",
+        participants: [],
+        dateStart: null,
+        dateEnd: null,
+        startTime: null,
+        endTime: null,
+        durationMinutes: null,
+        candidateNumber: null,
+        facility: {
+          preferred: "有玉",
+          fallbackLocation: null,
+          fallbackType: "meeting_room",
+          anyAvailable: true,
+        },
+        title: null,
+        sendEmail: null,
+      }),
+      {
+        preferredQuery: "有玉",
+        preferredType: "meeting_room",
+      },
     );
   });
 

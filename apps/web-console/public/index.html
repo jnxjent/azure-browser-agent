@@ -472,7 +472,7 @@
         const panel = element("div", "approval");
         panel.append(
           element("strong", "", "DeskNet'sで内容確認・手動追加待ち"),
-          element("p", "", `議題: ${request.title || "未入力（DeskNet'sで入力してください）"}\n日時: ${formatSlot(request)}\n参加者: ${request.participantIds.join("、")}\n設備: ${request.facilityId}\nメール: ${request.emailNotificationWillBeSent ? "送信する" : "送信しない"}\n自分には通知しない: オフ\n\n専用Edgeに入力済みの予約画面を表示しています。内容を確認し、DeskNet's上の「追加」を押してください。Agentは追加を押しません。\n\n別の候補にしたい場合や、DeskNet'sを閉じてしまった場合は「候補に戻る」を押してください。`),
+          element("p", "", `議題: ${request.title || "未入力（DeskNet'sで入力してください）"}\n日時: ${formatSlot(request)}\n参加者: ${request.participantIds.join("、")}\n設備: ${request.facilityId}\nメール: ${request.emailNotificationWillBeSent ? "送信する" : "送信しない"}\n本人への通知: 送信する\n\n専用Edgeに入力済みの予約画面を表示しています。内容を確認し、DeskNet's上の「追加」を押してください。Agentは追加を押しません。\n\n別の候補にしたい場合や、DeskNet'sを閉じてしまった場合は「候補に戻る」を押してください。`),
           renderBackToCandidatesButton(),
         );
         return panel;

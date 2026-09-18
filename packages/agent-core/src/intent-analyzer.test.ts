@@ -5,13 +5,27 @@ import { analyzeDeskNetsIntent } from "./intent-analyzer.js";
 const config = { endpoint: "https://example.openai.azure.com", apiKey: "test-key", deployment: "intent-model" };
 
 describe("analyzeDeskNetsIntent", () => {
+  it("preserves dialogue and asks for clarification instead of silently reparsing after an LLM failure", async () => {
+    const result = await analyzeDeskNetsIntent("さっきの続きで", new Date(), {
+      config, requireLlm: true,
+      conversationHistory: [{ role: "user", content: "明日16時から30分で" }],
+      conversationState: { selectedStart: "2026-09-17T07:00:00Z" },
+      fetchImplementation: async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        assert.ok(body.messages.some((m: {content: string}) => m.content === "明日16時から30分で"));
+        assert.equal(JSON.parse(body.messages.at(-1).content).savedSchedulingState.selectedStart, "2026-09-17T07:00:00Z");
+        return new Response("Unavailable", { status: 503 });
+      },
+    });
+    assert.equal(result.task.type, "clarify");
+  });
   it("uses Azure OpenAI structured output for a relative date range", async () => {
     let requestBody: Record<string, unknown> | undefined;
     const fetchImplementation: typeof fetch = async (_input, init) => {
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
         intent: "find_availability",
-        participants: [{ name: "安全太郎", organization: null }],
+        participants: [{ name: "私", organization: null }, { name: "安全太郎", organization: null }],
         dateStart: "2026-08-06",
         dateEnd: "2026-08-12",
         durationMinutes: 60,

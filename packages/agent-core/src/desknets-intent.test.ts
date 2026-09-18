@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseDeskNetsTask } from "./desknets-intent.js";
+import { parseDeskNetsTask, readDurationMinutes } from "./desknets-intent.js";
+
+describe("readDurationMinutes", () => {
+  it("distinguishes clock minutes from meeting duration", () => {
+    for (const text of ["16時30分", "１６時 ３０分開始で", "午後4時半で"]) {
+      assert.equal(readDurationMinutes(text), undefined, text);
+    }
+    assert.equal(readDurationMinutes("16時 30分から60分で"), 60);
+    assert.equal(readDurationMinutes("１時間半"), 90);
+    assert.equal(readDurationMinutes("1時間 30分"), 90);
+    assert.equal(readDurationMinutes("30分間"), 30);
+  });
+
+  it("rejects out-of-range durations without truncating their digits", () => {
+    for (const text of ["15分", "1000分", "100時間", "481分"]) {
+      assert.throws(() => readDurationMinutes(text), TypeError, text);
+    }
+  });
+});
 
 describe("parseDeskNetsTask", () => {
   it("parses a Japanese availability request", () => {
@@ -61,6 +79,55 @@ describe("parseDeskNetsTask", () => {
         date: "2026-09-14",
         endDate: "2026-09-14",
         durationMinutes: 60,
+      },
+    );
+  });
+
+  it("accepts a participant immediately before a meeting noun phrase", () => {
+    assert.deepEqual(
+      parseDeskNetsTask(
+        "来週月曜日に、私と当部の甲斐さんの打ち合わせ可能な日程を挙げて",
+        new Date("2026-09-11T11:00:00+09:00"),
+      ),
+      {
+        type: "find_availability",
+        participants: [{ name: "甲斐", organization: "当部" }],
+        date: "2026-09-14",
+        endDate: "2026-09-14",
+        durationMinutes: 60,
+      },
+    );
+  });
+
+  it("defaults an undated request to now through the next six days", () => {
+    assert.deepEqual(
+      parseDeskNetsTask(
+        "私と髙田部長の打ち合わせ可能な日程を教えて",
+        new Date("2026-09-16T14:12:00+09:00"),
+      ),
+      {
+        type: "find_availability",
+        participants: [{ name: "髙田" }],
+        date: "2026-09-16",
+        endDate: "2026-09-22",
+        durationMinutes: 60,
+      },
+    );
+  });
+
+  it("marks a nearest-slot request for automatic proposal", () => {
+    assert.deepEqual(
+      parseDeskNetsTask(
+        "私と髙田部長の最短の会議可能な時間を教えてほしい",
+        new Date("2026-09-16T14:12:00+09:00"),
+      ),
+      {
+        type: "find_availability",
+        participants: [{ name: "髙田" }],
+        date: "2026-09-16",
+        endDate: "2026-09-22",
+        durationMinutes: 60,
+        selectionMode: "earliest",
       },
     );
   });
@@ -347,7 +414,7 @@ describe("parseDeskNetsTask", () => {
         type: "book_meeting",
         facilityQuery: "ルームC",
         title: "",
-        sendEmail: false,
+        sendEmail: true,
       },
     );
   });
@@ -400,6 +467,10 @@ describe("parseDeskNetsTask", () => {
       type: "set_email_notification",
       sendEmail: false,
     });
+    assert.deepEqual(parseDeskNetsTask("送信で"), {
+      type: "set_email_notification",
+      sendEmail: true,
+    });
   });
 
   it("rejects incomplete availability prompts", () => {
@@ -410,7 +481,7 @@ describe("parseDeskNetsTask", () => {
     assert.deepEqual(parseDeskNetsTask("会議をセットしてください"), {
       type: "book_meeting",
       title: "",
-      sendEmail: false,
+      sendEmail: true,
     });
   });
 
@@ -483,13 +554,13 @@ describe("parseDeskNetsTask", () => {
       type: "book_meeting",
       facilityQuery: "有玉",
       title: "",
-      sendEmail: false,
+      sendEmail: true,
     });
     assert.deepEqual(parseDeskNetsTask("品川の会議室で予約して"), {
       type: "book_meeting",
       facilityQuery: "品川",
       title: "",
-      sendEmail: false,
+      sendEmail: true,
     });
   });
 
@@ -503,7 +574,7 @@ describe("parseDeskNetsTask", () => {
         type: "book_meeting",
         facilityQuery: "有玉",
         title: "",
-        sendEmail: false,
+        sendEmail: true,
         selectedStart: "2026-08-26T01:00:00.000Z",
         selectedEnd: "2026-08-26T02:00:00.000Z",
       },
@@ -517,7 +588,7 @@ describe("parseDeskNetsTask", () => {
         type: "book_meeting",
         facilityQuery: "品川",
         title: "",
-        sendEmail: false,
+        sendEmail: true,
         selectedStart: "2026-08-26T01:00:00.000Z",
         selectedEnd: "2026-08-26T02:00:00.000Z",
       },

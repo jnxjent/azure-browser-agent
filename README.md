@@ -47,6 +47,8 @@ The first runnable milestone is available:
 - direct candidate booking with an exact date/time, facility, and email instruction
 - optional Azure OpenAI Structured Outputs intent analysis with deterministic fallback
 - Asia/Tokyo relative ranges such as `今日`, `明日`, `1週間以内`, and `今月中` (maximum 31 days)
+- date-free searches defaulting to the current Japan instant through the next six days, with candidates in chronological order
+- `直近` / `最短` requests that automatically prepare the earliest preferred-room confirmation card with email and self-notification enabled
 - a single-execution DeskNet's queue so runs cannot operate the dedicated Edge concurrently
 - automatic participant selection from the schedule list
 - room/date/time/title entry, participant email configuration, and explicit AzureChat approval before the DeskNet's Add action
@@ -80,6 +82,15 @@ whose start time has already passed are omitted. The selected slot is checked
 again when it is selected and when the email choice is made so a stale candidate
 cannot be prepared.
 
+Candidate search hours default to **09:00–17:00 Asia/Tokyo**. Configure
+`DESKNETS_MEETING_START_TIME=09:00` and `DESKNETS_MEETING_END_TIME=17:00`
+in `.env.local`, using 24-hour `HH:mm` values with start earlier than end.
+Restart the Agent API after changing them, then request fresh candidates.
+The entire meeting must fit inside the window (a 30-minute meeting can start
+at 16:30, but not 17:00). Company holidays remain excluded. Requests such as
+`30分で、もっと前に空きはある？` re-search and mark the earliest candidate
+with `＜最短＞`, while allowing the user to choose a later candidate.
+
 When `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and
 `AZURE_OPENAI_DEPLOYMENT` are all present, the API sends the prompt and current
 Asia/Tokyo instant to Azure OpenAI and requests a strict JSON Schema intent. The
@@ -94,9 +105,29 @@ names, but the service does not automatically load secrets from that file.
 
 Relative range semantics are inclusive: `1週間以内` means today through six
 days later, and `今月中` means today through the last calendar day of the month.
+An availability request with no date uses the same seven-calendar-day window,
+starting today; slots earlier than the actual request time are removed.
 Multi-day searches reuse the selected participants and inspect each date in the
 range. Facility results are sorted chronologically and capped at the first 50
 clickable candidates.
+
+### Meeting-room preferences
+
+Users can persist their own ordered room preferences with a DeskNet's prompt,
+for example `会議室の優先順位を、アクトミーティングルームC、アクトの順で登録して`.
+The preference is keyed by the authenticated AzureChat `userId`, survives API
+restarts, and takes precedence over department defaults. By default it is kept
+in the Git-ignored `.data/desknets-facility-preferences.json`; set
+`DESKNETS_FACILITY_PREFERENCES_PATH` to choose another path. This application
+store is intentional: scheduling behavior does not depend on whether an
+AzureChat deployment has conversational memory enabled.
+
+For `経営企画部`, the built-in order is `アクトミーティングルームC` followed
+by any other available meeting room whose name contains `アクト`. A `直近` or
+`最短` request checks future slots chronologically, chooses the first slot that
+has one of those rooms, enables attendee email and notification to the requesting
+user, and returns the prepared booking as the final confirmation card without an
+intermediate email-choice question.
 
 ## Run locally
 

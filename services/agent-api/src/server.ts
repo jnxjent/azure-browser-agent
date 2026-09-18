@@ -6,14 +6,17 @@ import { pathToFileURL } from "node:url";
 import {
   createRun,
   analyzeDeskNetsIntent,
+  readAzureOpenAIIntentConfig,
   filterFutureAvailability,
   parseDeskNetsTask,
+  readDurationMinutes,
   validateCreateRunInput,
   ORGANIZATION_SUFFIX,
   type BookableAvailabilitySlot,
   type BrowserRun,
   type CreateRunInput,
   type DeskNetsTask,
+  type FindAvailabilityTask,
   type PendingBookingContext,
   type PendingParticipantChoice,
 } from "@azure-browser-agent/agent-core";
@@ -27,23 +30,34 @@ import {
   facilityChangeFromStructuredCommand,
   mergeFacilityChangeRequests,
   parseExplicitFacilityQuery,
+  parseFlexibleFacilityQuery,
   parseFacilityChangeRequest,
+  parseAlternativeFacilityRequest,
   type FacilityChangeRequest,
 } from "./facility-change.js";
 import { ParticipantAliasStore } from "./participant-alias-store.js";
+import {
+  FacilityPreferenceStore,
+  parseFacilityPreferenceRegistration,
+} from "./facility-preference-store.js";
 import { readStructuredCommandOrUndefined } from "./structured-command.js";
+import { loadSharedIntentConfiguration } from "./intent-configuration.js";
+
+loadSharedIntentConfiguration();
 
 const runs = new Map<string, BrowserRun>();
 const controllers = new Map<string, AbortController>();
 interface PendingFacilityChoice {
+  excludedFacilities?: string[];
   selectedStart: string;
   selectedEnd: string;
   title: string;
   sendEmail: boolean;
-  facilityScope?: string;
+  facilityScope?: string | undefined;
 }
 
 export interface PendingBookingConversation {
+  sendEmail?: boolean;
   context: PendingBookingContext;
   facilityId?: string;
   candidates?: BookableAvailabilitySlot[];
@@ -63,6 +77,13 @@ const participantAliasStore = new ParticipantAliasStore(
     process.cwd(),
     process.env.DESKNETS_PARTICIPANT_ALIASES_PATH ??
       ".data/desknets-participant-aliases.json",
+  ),
+);
+const facilityPreferenceStore = new FacilityPreferenceStore(
+  resolve(
+    process.cwd(),
+    process.env.DESKNETS_FACILITY_PREFERENCES_PATH ??
+      ".data/desknets-facility-preferences.json",
   ),
 );
 
@@ -214,10 +235,96 @@ async function route(
           prompt: await participantAliasStore.replaceAliases(submittedInput.prompt),
         }
       : submittedInput;
+    const registeredFacilityPreferences = parseFacilityPreferenceRegistration(
+      validatedInput.prompt,
+    );
+    if (validatedInput.site === "desknets" && registeredFacilityPreferences !== undefined) {
+      const preference = await facilityPreferenceStore.upsert(
+        validatedInput.userId,
+        registeredFacilityPreferences,
+      );
+      const completed: BrowserRun = {
+        ...createRun({ ...validatedInput, mode: "read" }),
+        status: "completed",
+        updatedAt: new Date().toISOString(),
+        result: {
+          summary: "Saved the user's meeting-room preference order.",
+          assistantMessage: `会議室の優先順位を登録しました: ${preference.facilities.join(" → ")}`,
+          evidence: [`User-specific room preferences: ${preference.facilities.length}`],
+        },
+      };
+      runs.set(completed.id, completed);
+      sendJson(response, 202, completed);
+      return;
+    }
     const pendingApproval = validatedInput.site === "desknets"
       ? findPendingApproval(validatedInput.userId, validatedInput.threadId)
       : undefined;
-    const durationChange = pendingApproval === undefined
+    const savedConversation = pendingBookings.get(validatedInput.threadId);
+    const roomChangeTask = validatedInput.site === "desknets" ? buildRoomOnlyChangeTask(validatedInput.prompt, savedConversation) : undefined;
+    if (roomChangeTask !== undefined && savedConversation !== undefined) {
+      cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId);
+      const changed = { ...createRun(validatedInput), input: { ...validatedInput, mode: "write" as const },
+        task: roomChangeTask, context: savedConversation.context };
+      runs.set(changed.id, changed);
+      startRun(changed.id);
+      sendJson(response, 202, changed);
+      return;
+    }
+    const numberedMatch = validatedInput.prompt.normalize("NFKC").trim().match(/^(?:では|それでは|じゃあ)?[、,\s]*(\d+)(?:番|番目)?(?:で|を選んで|にして)(?:お願いします)?[。.!！]?$/);
+    let semanticAnalysis = savedConversation?.candidates !== undefined && numberedMatch !== null
+      ? { source: "deterministic" as const, task: { type: "select_booking_candidate" as const, candidateNumber: Number(numberedMatch[1]) } }
+      : validatedInput.site === "desknets" && readAzureOpenAIIntentConfig() !== undefined
+      ? await analyzeDeskNetsIntent(validatedInput.prompt, new Date(), {
+          conversationHistory: validatedInput.conversationHistory ?? [],
+          conversationState: {
+            conversation: savedConversation === undefined ? null : {
+              ...savedConversation,
+              candidates: savedConversation.candidates?.slice(0, 50),
+              context: {
+                ...savedConversation.context,
+                availability: savedConversation.context.availability.slice(0, 50),
+                allFacilityAvailability: undefined,
+                originalAvailability: undefined,
+                originalAllFacilityAvailability: undefined,
+              },
+            },
+            currentProposal: pendingApproval?.result?.approvalRequest ?? (savedConversation?.selectedSlot === undefined ? null : {
+              ...savedConversation.selectedSlot, facilityId:savedConversation.facilityId,
+              title:savedConversation.context.title ?? "打ち合わせ",emailNotificationWillBeSent:savedConversation.sendEmail ?? true,
+            }),
+            pendingParticipantChoice: pendingParticipantChoices.get(validatedInput.threadId) ?? null,
+          },
+          requireLlm: true,
+        })
+      : undefined;
+    // A validated, explicit room-only request can recover from an LLM outage
+    // without reinterpreting dates or participants or authorizing registration.
+    if (semanticAnalysis?.failureKind !== undefined && savedConversation !== undefined) {
+      const previous = savedConversation.awaitingFacilityChoice;
+      const proposal = pendingApproval?.result?.approvalRequest;
+      const start = proposal?.start ?? previous?.selectedStart ?? savedConversation.selectedSlot?.start;
+      const end = proposal?.end ?? previous?.selectedEnd ?? savedConversation.selectedSlot?.end;
+      const alternative = parseAlternativeFacilityRequest(validatedInput.prompt,
+        previous?.facilityScope ?? inferFacilityScope(proposal?.facilityId ?? savedConversation.facilityId ?? ""));
+      if (alternative !== undefined && start !== undefined && end !== undefined) {
+        semanticAnalysis = { source: "deterministic", task: {
+          type: "book_meeting", facilityQuery: alternative.preferredQuery, excludePreviousFacility: true,
+          selectedStart: start, selectedEnd: end,
+          title: proposal?.title ?? previous?.title ?? savedConversation.context.title ?? "打ち合わせ",
+          sendEmail: proposal?.emailNotificationWillBeSent ?? previous?.sendEmail ?? true,
+        } };
+      }
+    }
+    if (semanticAnalysis?.task.type === "clarify") {
+      const clarification: BrowserRun = { ...createRun(validatedInput), status: "awaiting_user_input",
+        intentSource: semanticAnalysis.source, task: semanticAnalysis.task,
+        result: { summary: "Clarifying the scheduling conversation.", assistantMessage: semanticAnalysis.task.question, evidence: [] } };
+      runs.set(clarification.id, clarification);
+      sendJson(response, 202, clarification);
+      return;
+    }
+    const durationChange = pendingApproval === undefined || semanticAnalysis !== undefined
       ? undefined
       : readRequestedDurationChange(structuredCommand, validatedInput.prompt);
     if (
@@ -273,7 +380,7 @@ async function route(
       sendJson(response, 202, changedRun);
       return;
     }
-    const facilityChange = pendingApproval === undefined
+    const facilityChange = pendingApproval === undefined || semanticAnalysis !== undefined
       ? undefined
       : mergeFacilityChangeRequests(
           facilityChangeFromStructuredCommand(structuredCommand),
@@ -288,18 +395,25 @@ async function route(
     ) {
       const approval = pendingApproval.result.approvalRequest;
       const approvalAvailability = getCompanyWideAvailability(pendingApproval.context);
-      const slot = approvalAvailability.find(
+      let slot = approvalAvailability.find(
         (candidate) =>
           candidate.start === approval.start && candidate.end === approval.end,
       );
       if (slot === undefined) {
         throw new TypeError("変更対象の日時候補が失われました。空き時間を再検索してください。");
       }
+      if (facilityChange.excludePrevious) {
+        slot = { ...slot, availableFacilityIds: slot.availableFacilityIds.filter((id) => id !== approval.facilityId) };
+      }
       let facilityId: string;
       try {
+        const preferredSlot = restrictSlotToFacilityType(
+          slot,
+          facilityChange.preferredType,
+        );
         facilityId = resolveAutomaticFacilityForSlot(
           facilityChange.preferredQuery,
-          slot,
+          preferredSlot,
           pendingApproval.context.userOrganization,
           pendingApproval.context.userDisplayName,
         );
@@ -346,6 +460,7 @@ async function route(
       const awaitingConversation = pendingBookings.get(validatedInput.threadId);
       if (
         awaitingConversation?.awaitingFacilityChoice !== undefined &&
+        semanticAnalysis === undefined &&
         !isShowCandidatesRequest(validatedInput.prompt)
       ) {
         // A "候補に戻して"-style reply must escape the facility-choice
@@ -357,11 +472,12 @@ async function route(
           awaitingConversation,
           awaitingConversation.awaitingFacilityChoice,
           response,
+          structuredCommand,
         );
         return;
       }
       const awaitingParticipantChoice = pendingParticipantChoices.get(validatedInput.threadId);
-      if (awaitingParticipantChoice !== undefined) {
+      if (awaitingParticipantChoice !== undefined && semanticAnalysis === undefined) {
         if (isFreshAvailabilityRequest(validatedInput.prompt)) {
           // A complete new availability request supersedes the unresolved
           // organization question. Drop only that question and let the new
@@ -388,7 +504,24 @@ async function route(
           return;
         }
       }
-      const conversation = pendingBookings.get(validatedInput.threadId);
+      let conversation = pendingBookings.get(validatedInput.threadId);
+      const semanticTask = semanticAnalysis?.task;
+      const semanticDuration = semanticTask?.type === "book_meeting" && semanticTask.selectedStart && semanticTask.selectedEnd
+        ? (Date.parse(semanticTask.selectedEnd) - Date.parse(semanticTask.selectedStart)) / 60000 : undefined;
+      const conversationDurationChange = semanticDuration ?? (conversation === undefined || semanticAnalysis !== undefined
+        ? undefined
+        : readRequestedDurationChange(structuredCommand, validatedInput.prompt));
+      if (
+        conversation !== undefined &&
+        conversationDurationChange !== undefined &&
+        conversationDurationChange !== conversation.context.durationMinutes
+      ) {
+        conversation = resizePendingConversationDuration(
+          conversation,
+          conversationDurationChange,
+        );
+        pendingBookings.set(validatedInput.threadId, conversation);
+      }
       const requestedFacilityQuery =
         structuredCommand?.facility.preferred ??
         parseExplicitFacilityQuery(validatedInput.prompt);
@@ -400,13 +533,25 @@ async function route(
               ? conversation.context.availability
               : getCompanyWideAvailability(conversation.context),
           };
-      const selectedSlot = selectionContext === undefined
+      const selectedSlot = selectionContext === undefined || semanticAnalysis !== undefined
         ? undefined
-        : resolveTimeOnlySelection(validatedInput.prompt, selectionContext);
+        : resolveTimeOnlySelection(
+            validatedInput.prompt,
+            selectionContext,
+            structuredCommand?.action === "select_time" || structuredCommand?.action === "change_duration"
+              ? {
+                  date: structuredCommand.dateStart,
+                  startTime: structuredCommand.startTime,
+                  endTime: conversationDurationChange === undefined ? structuredCommand.endTime : null,
+                }
+              : undefined,
+          );
       const selectedFacilityQuery =
         requestedFacilityQuery ?? conversation?.context.facilityQuery;
-      const analysis = selectedSlot === undefined
-        ? await analyzeDeskNetsIntent(validatedInput.prompt)
+      const analysis = semanticAnalysis ?? (selectedSlot === undefined
+        ? await analyzeDeskNetsIntent(validatedInput.prompt, new Date(), {
+            conversationHistory: validatedInput.conversationHistory ?? [], conversationState: conversation,
+          })
         : {
             source: "deterministic" as const,
             task: {
@@ -415,12 +560,15 @@ async function route(
                 ? {}
                 : { facilityQuery: selectedFacilityQuery }),
               title: conversation?.context.title?.trim() || "打ち合わせ",
-              sendEmail: false,
+              sendEmail: structuredCommand?.sendEmail ?? !/メール.*(?:しない|不要|なし)/.test(validatedInput.prompt),
               selectedStart: selectedSlot.start,
               selectedEnd: selectedSlot.end,
             },
-          };
+          });
       let task = analysis.task;
+      if ("facilityQuery" in task && task.facilityQuery !== undefined) {
+        task = { ...task, facilityQuery: parseFlexibleFacilityQuery(task.facilityQuery)?.query ?? task.facilityQuery };
+      }
       run = { ...run, intentSource: analysis.source };
       if (task.type === "change_availability_duration") {
         const participants = conversation?.context.participants;
@@ -436,12 +584,18 @@ async function route(
           date: conversation.context.date,
           endDate,
           durationMinutes: task.durationMinutes,
+          ...(conversation.context.selectionMode === undefined ? {} : { selectionMode: conversation.context.selectionMode }),
           ...(conversation.context.facilityQuery === undefined
             ? {}
             : { facilityQuery: conversation.context.facilityQuery }),
         };
       }
       if (task.type === "find_availability") {
+        task = inheritAvailabilityPreferences(task, conversation?.context, validatedInput.prompt);
+        pendingParticipantChoices.delete(validatedInput.threadId);
+        if (isEarliestMeetingRequest(validatedInput.prompt)) {
+          task = { ...task, selectionMode: "earliest" };
+        }
         const today = currentJapanDate();
         if (task.endDate < today) {
           throw new TypeError(
@@ -514,44 +668,17 @@ async function route(
         return;
       }
       if (task.type === "select_booking_candidate") {
-        const candidates = conversation?.candidates;
-        const facilityId = conversation?.facilityId;
-        if (conversation === undefined || candidates === undefined || facilityId === undefined) {
-          throw new TypeError("先に設備の空いている候補を表示してください。");
-        }
-        const selectedSlot = candidates[task.candidateNumber - 1];
-        if (selectedSlot === undefined) {
-          throw new TypeError(`候補番号は1から${candidates.length}の範囲で指定してください。`);
+        const selectedSlot = conversation?.candidates?.[task.candidateNumber - 1];
+        if (selectedSlot === undefined || conversation === undefined) {
+          throw new TypeError("有効な候補番号を指定してください。");
         }
         assertSlotHasNotStarted(selectedSlot);
-        pendingBookings.set(validatedInput.threadId, {
-          ...conversation,
-          selectedCandidateNumber: task.candidateNumber,
-          selectedSlot,
-          awaitingEmailChoice: true,
-        });
-        run = {
-          ...run,
-          input: { ...validatedInput, mode: "read" },
-          task,
-          status: "awaiting_user_input",
-          updatedAt: new Date().toISOString(),
-          result: {
-            summary: `Selected candidate ${task.candidateNumber}; awaiting email choice.`,
-            assistantMessage: `以下の内容でミーティングを確定してよいですか？\n日時: ${formatJapanSlot(selectedSlot)}\n参加者: ${selectedSlot.participantIds.join("、")}\n会議室: ${facilityId}\n出席者（本人を含む）へのメール送信の有無を選択してください。`,
-            evidence: [`Selected candidate: ${task.candidateNumber}`],
-            meetingProposal: {
-              title: conversation.context.title ?? "",
-              start: selectedSlot.start,
-              end: selectedSlot.end,
-              participantIds: selectedSlot.participantIds,
-              facilityId,
-            },
-          },
+        task = {
+          type: "book_meeting", ...(conversation.facilityId === undefined ? {} : { facilityQuery: conversation.facilityId }),
+          title: conversation.context.title ?? "打ち合わせ",
+          sendEmail: structuredCommand?.sendEmail ?? true,
+          selectedStart: selectedSlot.start, selectedEnd: selectedSlot.end,
         };
-        runs.set(run.id, run);
-        sendJson(response, 202, run);
-        return;
       }
       if (task.type === "set_email_notification") {
         if (
@@ -590,7 +717,12 @@ async function route(
             "直接予約する場合は、候補内の日付と開始・終了時刻を指定してください。",
           );
         }
-        const bookingAvailability = getCompanyWideAvailability(conversation.context);
+        const previousFacility = pendingApproval?.result?.approvalRequest?.facilityId ?? conversation.facilityId;
+        const excluded = task.excludePreviousFacility
+          ? [...(conversation.awaitingFacilityChoice?.excludedFacilities ?? []), ...(previousFacility ? [previousFacility] : [])] : [];
+        const bookingAvailability = getCompanyWideAvailability(conversation.context).map((candidate) => ({
+          ...candidate, availableFacilityIds: candidate.availableFacilityIds.filter((id) => !excluded.includes(id)),
+        }));
         const slot = bookingAvailability.find(
           (candidate) => candidate.start === task.selectedStart && candidate.end === task.selectedEnd,
         );
@@ -602,15 +734,18 @@ async function route(
         const resolvedTitle = task.title || conversation.context.title || "";
         let facilityId: string;
         try {
+          const savedPreferences = await facilityPreferenceStore.get(validatedInput.userId);
           facilityId = task.facilityQuery === undefined
-            ? resolveFacilityWithPreference(
-                undefined,
+            ? resolveEarliestPreferredFacility(
                 [slot],
                 conversation.context.userOrganization,
                 conversation.context.userDisplayName,
-                task.selectedStart,
-                task.selectedEnd,
-              )
+                FACILITY_PREFERENCE_OVERRIDE_BY_USER,
+                FACILITY_PREFERENCE_BY_ORGANIZATION,
+                savedPreferences?.facilities,
+              )?.facilityId ?? (() => {
+                throw new TypeError("優先順位に一致する空き会議室がありません。");
+              })()
             : resolveAutomaticFacilityForSlot(
                 task.facilityQuery,
                 slot,
@@ -627,6 +762,7 @@ async function route(
           pendingBookings.set(validatedInput.threadId, {
             ...conversation,
             awaitingFacilityChoice: {
+              excludedFacilities: task.facilityQuery === undefined ? [] : [task.facilityQuery],
               selectedStart: task.selectedStart,
               selectedEnd: task.selectedEnd,
               title: resolvedTitle,
@@ -659,7 +795,7 @@ async function route(
         }
         assertSlotHasNotStarted(slot);
         // Deliberately not deleted here either — see the comment above.
-        pendingBookings.set(validatedInput.threadId, clearTransientConversationFlags(conversation));
+        pendingBookings.set(validatedInput.threadId, { ...clearTransientConversationFlags(conversation), selectedSlot: slot, facilityId });
         run = {
           ...run,
           input: { ...validatedInput, mode: "write" },
@@ -744,13 +880,14 @@ async function route(
       segments.length === 4 &&
       segments[3] === "approve"
     ) {
-      if (run.status !== "awaiting_approval" || run.result?.approvalRequest === undefined) {
+      const proposal = getReopenableBookingProposal(run);
+      if (proposal === undefined || run.result === undefined) {
         sendJson(response, 409, {
           error: "This run is not waiting for final booking approval.",
         });
         return;
       }
-      if (Date.parse(run.result.approvalRequest.start) < Date.now()) {
+      if (Date.parse(proposal.start) < Date.now()) {
         sendJson(response, 409, {
           error: "選択した開始時刻を過ぎたため確定できません。空き時間を再検索してください。",
         });
@@ -780,7 +917,7 @@ async function route(
         task: { ...run.task, title: approvedTitle },
         result: {
           ...run.result,
-          approvalRequest: { ...run.result.approvalRequest, title: approvedTitle },
+          approvalRequest: { ...proposal, title: approvedTitle },
         },
         status: "queued",
         updatedAt: new Date().toISOString(),
@@ -797,6 +934,15 @@ async function route(
   }
 
   sendJson(response, 404, { error: "Route not found." });
+}
+
+export function getReopenableBookingProposal(run: BrowserRun) {
+  if (run.status === "awaiting_approval") return run.result?.approvalRequest;
+  if (run.status === "awaiting_user_input") return run.result?.manualActionRequest;
+  if (run.status === "failed" && run.approval?.approvedAt !== undefined) {
+    return run.result?.manualActionRequest ?? run.result?.approvalRequest;
+  }
+  return undefined;
 }
 
 export function restrictSlotToFacilityType(
@@ -856,6 +1002,34 @@ export function resizeBookableAvailability(
   });
 }
 
+export function resizePendingConversationDuration(
+  conversation: PendingBookingConversation,
+  durationMinutes: number,
+): PendingBookingConversation {
+  const context = conversation.context;
+  const originalAvailability = context.originalAvailability ?? context.availability;
+  const originalAllFacilityAvailability = context.originalAllFacilityAvailability ?? getCompanyWideAvailability(context);
+  const availability = resizeBookableAvailability(
+    originalAvailability,
+    durationMinutes,
+  );
+  const allFacilityAvailability = resizeBookableAvailability(
+    originalAllFacilityAvailability,
+    durationMinutes,
+  );
+  return {
+    ...conversation,
+    context: {
+      ...context,
+      originalAvailability,
+      originalAllFacilityAvailability,
+      durationMinutes,
+      availability,
+      allFacilityAvailability,
+    },
+  };
+}
+
 function isIntervalCoveredByFacility(
   availability: BookableAvailabilitySlot[],
   facilityId: string,
@@ -880,20 +1054,21 @@ export function readRequestedDurationChange(
   structuredCommand: ReturnType<typeof readStructuredCommandOrUndefined>,
   prompt: string,
 ): number | undefined {
+  // Explicit user wording wins over stale model output. Use the same parser
+  // for initial requests and follow-ups so clock times are never durations.
+  const explicit = readDurationMinutes(prompt);
+  if (explicit !== undefined) {
+    return explicit;
+  }
   if (
-    structuredCommand?.action === "change_duration" &&
-    structuredCommand.durationMinutes !== null
+    structuredCommand?.durationMinutes !== null &&
+    structuredCommand?.durationMinutes !== undefined &&
+    (structuredCommand.action === "change_duration" ||
+      structuredCommand.action === "select_time")
   ) {
     return structuredCommand.durationMinutes;
   }
-  try {
-    const parsed = parseDeskNetsTask(prompt);
-    return parsed.type === "change_availability_duration"
-      ? parsed.durationMinutes
-      : undefined;
-  } catch {
-    return undefined;
-  }
+  return undefined;
 }
 
 function formatJapanInstant(value: string): string {
@@ -984,11 +1159,57 @@ async function executeRun(runId: string): Promise<void> {
   const worker =
     running.input.site === "desknets" ? deskNetsWorker : mockWorker;
   try {
-    const completed = await worker.execute(running, controller.signal);
+    let completed = await worker.execute(running, controller.signal);
+    if (
+      completed.task?.type === "find_availability" &&
+      completed.task.selectionMode === "earliest" &&
+      completed.result?.pendingBooking !== undefined
+    ) {
+      completed = buildEarliestCandidatesRun(completed);
+    }
     runs.set(runId, completed);
-    const pending = completed.result?.pendingBooking;
+    const pending = completed.result?.pendingBooking ?? completed.context;
     if (pending !== undefined) {
-      pendingBookings.set(completed.input.threadId, { context: pending });
+      const proposal = completed.result?.approvalRequest ??
+        completed.result?.manualActionRequest ??
+        completed.result?.meetingProposal;
+      const selectedSlot = proposal === undefined
+        ? undefined
+        : pending.availability.find(
+            (slot) => slot.start === proposal.start && slot.end === proposal.end,
+          );
+      pendingBookings.set(
+        completed.input.threadId,
+        proposal === undefined || selectedSlot === undefined
+          ? { context: pending, candidates: [...pending.availability].sort((a, b) => Date.parse(a.start) - Date.parse(b.start)).slice(0, 50) }
+          : {
+              context: pending,
+              candidates: pendingBookings.get(completed.input.threadId)?.candidates ?? [...pending.availability].sort((a, b) => Date.parse(a.start) - Date.parse(b.start)).slice(0, 50),
+              facilityId: proposal.facilityId,
+              sendEmail: completed.task?.type === "book_meeting" ? completed.task.sendEmail : true,
+              selectedSlot,
+              awaitingEmailChoice: true,
+            },
+      );
+      if (proposal !== undefined) {
+        const saved = pendingBookings.get(completed.input.threadId)!;
+        saved.context = { ...saved.context, title: proposal.title };
+      }
+      if (completed.task?.type === "book_meeting" && completed.result?.facilityAlternatives !== undefined) {
+        const task = completed.task;
+        const retainedSlot = pending.availability.find(slot => slot.start === task.selectedStart && slot.end === task.selectedEnd);
+        pendingBookings.set(completed.input.threadId, {
+          context: pending,
+          sendEmail: task.sendEmail,
+          ...(task.previousFacilityId === undefined ? {} : { facilityId:task.previousFacilityId }),
+          ...(retainedSlot === undefined ? {} : { selectedSlot: retainedSlot }),
+          awaitingFacilityChoice: {
+            selectedStart: task.selectedStart!, selectedEnd: task.selectedEnd!, title: task.title,
+            sendEmail: task.sendEmail, ...(task.facilityScope === undefined ? {} : { facilityScope: task.facilityScope }),
+            excludedFacilities: task.facilityQuery ? [task.facilityQuery] : [],
+          },
+        });
+      }
     }
     const participantChoice = completed.result?.participantChoice;
     if (participantChoice !== undefined) {
@@ -999,6 +1220,19 @@ async function executeRun(runId: string): Promise<void> {
     if (current?.status === "cancelled") return;
     const message = error instanceof Error ? error.message : "Unknown error";
     if (current !== undefined) {
+      if (current.task?.type === "book_meeting" && current.context !== undefined && /埋まっています/.test(message)
+          && current.task.selectedStart !== undefined && current.task.selectedEnd !== undefined) {
+        const previous = pendingBookings.get(current.input.threadId);
+        pendingBookings.set(current.input.threadId, {
+          ...previous, context: current.context,
+          awaitingFacilityChoice: {
+            selectedStart: current.task.selectedStart, selectedEnd: current.task.selectedEnd,
+            title: current.task.title, sendEmail: current.task.sendEmail,
+            facilityScope: inferFacilityScope(current.task.facilityQuery ?? ""),
+            excludedFacilities: [...(previous?.awaitingFacilityChoice?.excludedFacilities ?? []), current.task.facilityQuery ?? ""],
+          },
+        });
+      }
       runs.set(runId, {
         ...current,
         status: "failed",
@@ -1009,6 +1243,34 @@ async function executeRun(runId: string): Promise<void> {
   } finally {
     controllers.delete(runId);
   }
+}
+
+export function buildEarliestCandidatesRun(completed: BrowserRun): BrowserRun {
+  const result = completed.result;
+  const context = result?.pendingBooking;
+  if (result === undefined || context === undefined) return completed;
+  const candidates = filterFutureAvailability(context.availability)
+    .filter((slot) => slot.availableFacilityIds.length > 0)
+    .sort((left, right) => Date.parse(left.start) - Date.parse(right.start))
+    .filter((slot, index, slots) => slots.findIndex((other) =>
+      other.start === slot.start && other.end === slot.end) === index)
+    .slice(0, 5);
+  const lines = candidates.map((slot, index) =>
+    `${index + 1}. ${index === 0 ? "＜最短＞ " : ""}${formatJapanSlot(slot)}（${slot.durationMinutes}分）`);
+  return {
+    ...completed,
+    result: {
+      ...result,
+      availability: candidates,
+      pendingBooking: { ...context, availability: candidates },
+      summary: "Listed up to five earliest available meeting times for user selection.",
+      assistantMessage: candidates.length === 0
+        ? "検索期間内に、参加者全員と会議室が空いている候補がありません。検索期間や条件を変更してください。"
+        : `検索期間（${context.date}〜${context.endDate ?? context.date}）内で、開始時刻が早い順に${candidates.length}件の候補を表示します。\n${lines.join("\n")}\n「では、1で」のように番号で選択してください。後の日時を希望する場合は2番以降も選べます。`,
+    },
+    status: "completed",
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function cancelRun(run: BrowserRun): void {
@@ -1029,8 +1291,8 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.length;
-    if (size > 64 * 1024) {
-      throw new TypeError("Request body exceeds 64 KiB.");
+    if (size > 512 * 1024) {
+      throw new TypeError("Request body exceeds 512 KiB.");
     }
     chunks.push(buffer);
   }
@@ -1147,7 +1409,7 @@ function normalizeFacilityName(value: string): string {
 // without a code change and rebuild. These defaults are the mappings
 // confirmed so far: 経営企画部 -> アクト系(ルームC優先), 営業統括部 -> 有玉.
 const DEFAULT_FACILITY_PREFERENCE_BY_ORGANIZATION: Record<string, string[]> = {
-  "経営企画部": ["ミーティングルームC", "アクト"],
+  "経営企画部": ["アクトミーティングルームC", "アクト"],
   "営業統括部": ["有玉"],
 };
 const FACILITY_PREFERENCE_BY_ORGANIZATION = parseFacilityPreferenceTable(
@@ -1230,7 +1492,11 @@ function computeFacilityPreferences(
   displayName: string | undefined,
   userOverrides: Record<string, string[]>,
   organizationPreferences: Record<string, string[]>,
+  requesterPreferences?: string[],
 ): string[] | undefined {
+  if (requesterPreferences !== undefined && requesterPreferences.length > 0) {
+    return requesterPreferences;
+  }
   const override = displayName === undefined ? undefined : userOverrides[displayName];
   if (override !== undefined) return override;
   const configured = organization === undefined ? undefined : organizationPreferences[organization];
@@ -1248,10 +1514,17 @@ export function resolveFacilityWithPreference(
   selectedEnd: string,
   userOverrides: Record<string, string[]> = FACILITY_PREFERENCE_OVERRIDE_BY_USER,
   organizationPreferences: Record<string, string[]> = FACILITY_PREFERENCE_BY_ORGANIZATION,
+  requesterPreferences?: string[],
 ): string {
   if (query !== undefined) return resolveConversationFacility(query, availability);
 
-  const preferences = computeFacilityPreferences(organization, displayName, userOverrides, organizationPreferences);
+  const preferences = computeFacilityPreferences(
+    organization,
+    displayName,
+    userOverrides,
+    organizationPreferences,
+    requesterPreferences,
+  );
   if (preferences === undefined || preferences.length === 0) {
     throw new TypeError("会議室を指定してください。");
   }
@@ -1283,6 +1556,7 @@ export function resolveAutomaticFacilityForSlot(
   displayName: string | undefined,
   userOverrides: Record<string, string[]> = FACILITY_PREFERENCE_OVERRIDE_BY_USER,
   organizationPreferences: Record<string, string[]> = FACILITY_PREFERENCE_BY_ORGANIZATION,
+  requesterPreferences?: string[],
 ): string {
   let candidates = [...slot.availableFacilityIds];
   if (query !== undefined) {
@@ -1304,6 +1578,7 @@ export function resolveAutomaticFacilityForSlot(
     displayName,
     userOverrides,
     organizationPreferences,
+    requesterPreferences,
   ) ?? [];
   for (const preference of preferences) {
     const normalizedPreference = normalizeFacilityName(preference);
@@ -1318,9 +1593,100 @@ export function resolveAutomaticFacilityForSlot(
   return selected;
 }
 
+export function resolveEarliestPreferredFacility(
+  availability: BookableAvailabilitySlot[],
+  organization: string | undefined,
+  displayName: string | undefined,
+  userOverrides: Record<string, string[]> = FACILITY_PREFERENCE_OVERRIDE_BY_USER,
+  organizationPreferences: Record<string, string[]> = FACILITY_PREFERENCE_BY_ORGANIZATION,
+  requesterPreferences?: string[],
+): { slot: BookableAvailabilitySlot; facilityId: string } | undefined {
+  const preferences = computeFacilityPreferences(
+    organization,
+    displayName,
+    userOverrides,
+    organizationPreferences,
+    requesterPreferences,
+  );
+  if (preferences === undefined || preferences.length === 0) return undefined;
+
+  const chronological = filterFutureAvailability(availability)
+    .sort((left, right) => Date.parse(left.start) - Date.parse(right.start));
+  for (const slot of chronological) {
+    for (const preference of preferences) {
+      const normalizedPreference = normalizeFacilityName(preference);
+      const facilityId = slot.availableFacilityIds
+        .filter((candidate) =>
+          normalizeFacilityName(candidate).includes(normalizedPreference),
+        )
+        .sort((left, right) => left.localeCompare(right, "ja"))[0];
+      if (facilityId !== undefined) return { slot, facilityId };
+    }
+  }
+  return undefined;
+}
+
+export function isEarliestMeetingRequest(prompt: string): boolean {
+  return /(?:直近|最短|一番早|最も早|もっと(?:前|早)|より早)/.test(prompt.normalize("NFKC"));
+}
+
+export function buildRoomOnlyChangeTask(prompt: string, saved: PendingBookingConversation | undefined): import("@azure-browser-agent/agent-core").BookMeetingTask | undefined {
+  if (!saved) return undefined;
+  // Mixed requests must retain their date/time/participant edits too, so leave
+  // those to the full intent interpreter rather than silently freezing them.
+  if (/(?:\d+\s*(?:時|分|日)|\d+[:：/]\d+|明日|来週|翌日|参加者|メンバー|部長|次長|さん)/.test(prompt.normalize("NFKC"))) return undefined;
+  const previous = saved.awaitingFacilityChoice;
+  const slot = saved.selectedSlot;
+  const start = previous?.selectedStart ?? slot?.start;
+  const end = previous?.selectedEnd ?? slot?.end;
+  if (!start || !end) return undefined;
+  const scope = previous?.facilityScope ?? inferFacilityScope(saved.facilityId ?? saved.context.facilityQuery ?? "");
+  const roomPrompt = prompt.normalize("NFKC").trim().replace(/^(?:会議室|設備)\s*(?:は|を)\s*[、,]?\s*/, "");
+  const change = parseAlternativeFacilityRequest(roomPrompt, scope) ?? parseFacilityChangeRequest(prompt);
+  const choice = cleanFacilityChoiceReply(prompt);
+  const flexibleChoice = parseFlexibleFacilityQuery(choice);
+  const scopedChoice = flexibleChoice?.facilityType !== undefined ? flexibleChoice.query : undefined;
+  const normalizeRoom = (name: string) => name.normalize("NFKC").replace(/\s+/g, "");
+  const offeredChoice = choice ? getCompanyWideAvailability(saved.context).flatMap(s=>s.availableFacilityIds)
+    .find(name=>normalizeRoom(name)===normalizeRoom(choice)) : undefined;
+  const query = change?.preferredQuery ?? offeredChoice ?? scopedChoice;
+  if (!query) return undefined;
+  return { type:"book_meeting", facilityOnlyChange:true,
+    ...(saved.facilityId === undefined ? {} : { previousFacilityId:saved.facilityId }),
+    facilityQuery:query, ...((inferFacilityScope(query) ?? scope) === undefined ? {} : { facilityScope:(inferFacilityScope(query) ?? scope)! }),
+    ...(change?.excludePrevious ? {excludePreviousFacility:true} : {}),
+    title:previous?.title ?? saved.context.title ?? "打ち合わせ", sendEmail:previous?.sendEmail ?? saved.sendEmail ?? true,
+    selectedStart:start, selectedEnd:end };
+}
+
+export function inheritAvailabilityPreferences(
+  task: FindAvailabilityTask, previous: PendingBookingContext | undefined, prompt: string,
+): FindAvailabilityTask {
+  if (!previous) return task;
+  return {
+    ...task,
+    ...(previous.selectionMode === "earliest" && readDurationMinutes(prompt) !== undefined
+      ? { selectionMode: "earliest" as const } : {}),
+    participants: task.participants.map(participant => {
+      const saved = previous.participants?.find(p => p.name === participant.name);
+      // Model-generated refinements omit the internal fallback flag. Keep it
+      // for the same participant/department unless the user explicitly names
+      // that department again (which is a new, strict qualification).
+      return saved?.organizationFallback && saved.organization === participant.organization &&
+        !prompt.includes(saved.organization ?? "")
+        ? { ...participant, organizationFallback: true } : participant;
+    }),
+  };
+}
+
 export function resolveTimeOnlySelection(
   prompt: string,
   context: PendingBookingContext,
+  structuredSelection?: {
+    date?: string | null;
+    startTime?: string | null;
+    endTime?: string | null;
+  },
 ): BookableAvailabilitySlot | undefined {
   const normalized = prompt.normalize("NFKC").trim();
   const rangeMatch = normalized.match(
@@ -1328,32 +1694,58 @@ export function resolveTimeOnlySelection(
   );
   const startOnlyMatch = rangeMatch === null
     ? normalized.match(
-        /(\d{1,2})\s*(?:時|:)\s*(\d{1,2})?(?:\s*分)?\s*(?:開始|スタート|から)/,
+        /(\d{1,2})\s*(?:時|:)\s*(\d{1,2})?(?:\s*分)?\s*(?:開始|スタート|から|で|$)/,
       )
     : null;
-  const match = rangeMatch ?? startOnlyMatch;
-  if (match === null) return undefined;
+  const halfStartOnlyMatch = rangeMatch === null && startOnlyMatch === null
+    ? normalized.match(/(\d{1,2})\s*時\s*半\s*(?:開始|スタート|から|で|$)/)
+    : null;
+  const match = rangeMatch ?? startOnlyMatch ?? halfStartOnlyMatch;
+  const structuredStart = match === null
+    ? parseStructuredTime(structuredSelection?.startTime)
+    : undefined;
+  if (match === null && structuredStart === undefined) return undefined;
 
-  const startHour = Number.parseInt(match[1] ?? "", 10);
-  const startMinute = Number.parseInt(match[2] ?? "0", 10);
+  let startHour = match === null
+    ? structuredStart!.hour
+    : Number.parseInt(match[1] ?? "", 10);
+  const startMinute = match === null
+    ? structuredStart!.minute
+    : halfStartOnlyMatch === null
+      ? Number.parseInt(match[2] ?? "0", 10)
+      : 30;
+  if (match !== null) {
+    const prefix = normalized.slice(0, match.index);
+    if (/午後\s*$/.test(prefix) && startHour < 12) startHour += 12;
+    if (/午前\s*$/.test(prefix) && startHour === 12) startHour = 0;
+  }
   const inferredEndMinutes =
     startHour * 60 + startMinute + context.durationMinutes;
-  const endHour = rangeMatch === null
-    ? Math.floor(inferredEndMinutes / 60) % 24
-    : Number.parseInt(match[3] ?? "", 10);
-  const endMinute = rangeMatch === null
-    ? inferredEndMinutes % 60
-    : Number.parseInt(match[4] ?? "0", 10);
+  const structuredEnd = match === null
+    ? parseStructuredTime(structuredSelection?.endTime)
+    : undefined;
+  const endHour = rangeMatch !== null
+    ? Number.parseInt(rangeMatch[3] ?? "", 10)
+    : structuredEnd?.hour ?? Math.floor(inferredEndMinutes / 60) % 24;
+  const endMinute = rangeMatch !== null
+    ? Number.parseInt(rangeMatch[4] ?? "0", 10)
+    : structuredEnd?.minute ?? inferredEndMinutes % 60;
   if (
     startHour > 23 || startMinute > 59 || endHour > 23 || endMinute > 59
   ) {
     throw new TypeError("有効な開始・終了時刻を指定してください。");
   }
 
+  const requestedDate = readSelectionDate(
+    normalized,
+    structuredSelection?.date,
+    context.date,
+  );
   const matchingSlots = context.availability.filter((slot) => {
     const start = japanDateAndTime(slot.start);
     const end = japanDateAndTime(slot.end);
-    return start.hour === startHour && start.minute === startMinute &&
+    return (requestedDate === undefined || start.date === requestedDate) &&
+      start.hour === startHour && start.minute === startMinute &&
       end.hour === endHour && end.minute === endMinute;
   });
   if (matchingSlots.length === 0) {
@@ -1366,6 +1758,59 @@ export function resolveTimeOnlySelection(
     throw new TypeError("複数の日付に同じ時刻の候補があります。日付も指定してください。");
   }
   return matchingSlots[0];
+}
+
+function parseStructuredTime(
+  value: string | null | undefined,
+): { hour: number; minute: number } | undefined {
+  const match = value?.normalize("NFKC").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (match?.[1] === undefined || match[2] === undefined) return undefined;
+  const hour = Number.parseInt(match[1], 10);
+  const minute = Number.parseInt(match[2], 10);
+  if (hour > 23 || minute > 59) return undefined;
+  return { hour, minute };
+}
+
+function readSelectionDate(
+  prompt: string,
+  structuredDate: string | null | undefined,
+  contextDate: string,
+): string | undefined {
+  const fullDate = prompt.match(/(20\d{2})\s*(?:年|[/.\-])\s*(\d{1,2})\s*(?:月|[/.\-])\s*(\d{1,2})\s*日?/);
+  if (fullDate?.[1] !== undefined && fullDate[2] !== undefined && fullDate[3] !== undefined) {
+    return formatSelectionDate(fullDate[1], fullDate[2], fullDate[3]);
+  }
+
+  const shortDate = prompt.match(/(?:^|[^\d])(\d{1,2})\s*(?:月|[/.])\s*(\d{1,2})\s*日?/);
+  if (shortDate?.[1] !== undefined && shortDate[2] !== undefined) {
+    const year = contextDateYear(structuredDate) ?? contextDate.slice(0, 4);
+    return formatSelectionDate(year, shortDate[1], shortDate[2]);
+  }
+
+  const structured = structuredDate?.normalize("NFKC").trim();
+  const structuredMatch = structured?.match(/^(20\d{2})-(\d{2})-(\d{2})$/);
+  if (structuredMatch?.[1] !== undefined && structuredMatch[2] !== undefined && structuredMatch[3] !== undefined) {
+    return formatSelectionDate(structuredMatch[1], structuredMatch[2], structuredMatch[3]);
+  }
+  return undefined;
+}
+
+function contextDateYear(value: string | null | undefined): string | undefined {
+  const match = value?.match(/^(20\d{2})-/);
+  return match?.[1];
+}
+
+function formatSelectionDate(yearText: string, monthText: string, dayText: string): string | undefined {
+  const year = Number.parseInt(yearText, 10);
+  const month = Number.parseInt(monthText, 10);
+  const day = Number.parseInt(dayText, 10);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) return undefined;
+  return `${year.toString().padStart(4, "0")}-${month.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
 }
 
 function japanDateAndTime(value: string): {
@@ -1450,6 +1895,9 @@ export function formatUnavailableFacilityChoiceMessage(
 
 export function inferFacilityScope(query: string): string | undefined {
   const normalized = query.normalize("NFKC").trim();
+  const knownLocation = ["ミダックこなん","有玉","アクト","品川","御殿山","富士宮","名古屋","都田","奥山"].find(location=>normalized.startsWith(location));
+  if (knownLocation) return knownLocation;
+  if (["有玉","アクト","品川","御殿山","富士宮","名古屋","都田","奥山"].includes(normalized)) return normalized;
   const match = normalized.match(
     /^(.+?)(?:大会議室|小会議室|会議室|応接室|ミーティングルーム|ルーム)/,
   );
@@ -1478,6 +1926,7 @@ function handleFacilityChoiceReply(
   conversation: PendingBookingConversation,
   pending: PendingFacilityChoice,
   response: ServerResponse,
+  structuredCommand?: ReturnType<typeof readStructuredCommandOrUndefined>,
 ): void {
   const companyWideAvailability = getCompanyWideAvailability(conversation.context);
   const slot = companyWideAvailability.find(
@@ -1489,7 +1938,16 @@ function handleFacilityChoiceReply(
   }
   let facilityId: string;
   const replyQuery = cleanFacilityChoiceReply(validatedInput.prompt);
+  const alternative = parseAlternativeFacilityRequest(validatedInput.prompt, pending.facilityScope);
+  const interpreted = alternative ?? facilityChangeFromStructuredCommand(structuredCommand);
   try {
+    if (interpreted !== undefined) {
+      const eligible = restrictSlotToFacilityType({ ...slot, availableFacilityIds: slot.availableFacilityIds.filter(
+        (id) => !(pending.excludedFacilities ?? []).some((excluded) => normalizeFacilityName(id) === normalizeFacilityName(excluded)),
+      ) }, interpreted.preferredType);
+      facilityId = resolveAutomaticFacilityForSlot(interpreted.preferredQuery, eligible,
+        conversation.context.userOrganization, conversation.context.userDisplayName);
+    } else {
     try {
       facilityId = resolveConversationFacility(replyQuery, [slot]);
     } catch (error) {
@@ -1499,6 +1957,7 @@ function handleFacilityChoiceReply(
         [slot],
       );
     }
+    }
   } catch {
     const askAgain: BrowserRun = {
       ...run,
@@ -1507,7 +1966,8 @@ function handleFacilityChoiceReply(
       updatedAt: new Date().toISOString(),
       result: {
         summary: "Facility choice was not recognized; asking again.",
-        assistantMessage: formatFacilityChoiceMessage(slot.availableFacilityIds),
+        assistantMessage: interpreted === undefined ? formatFacilityChoiceMessage(slot.availableFacilityIds)
+          : `${interpreted.preferredQuery}の条件に合う別の空き会議室がありません。日時または場所を変更してください。`,
         evidence: [`Candidates: ${slot.availableFacilityIds.join("、")}`],
       },
     };
@@ -1574,12 +2034,16 @@ export function matchOfferedOrganizations(
 // An unresolved organization question must not trap the thread forever.
 // A fully specified availability request is treated as a replacement for
 // the old search and is allowed to proceed through normal intent analysis.
-// Using the deterministic parser here keeps short organization answers such
-// as "経営企画部の山本さんです" in the choice flow because they still lack a
-// date and therefore are not complete find_availability requests.
+// Requiring scheduling language keeps short organization answers such as
+// "経営企画部の山本さんです" in the choice flow even though ordinary new
+// availability requests are now allowed to omit their date.
 export function isFreshAvailabilityRequest(prompt: string): boolean {
+  const normalized = prompt.normalize("NFKC");
+  if (!/(?:空き|予定|日程|打ち合わせ|会議|候補|調べ|直近|最短)/.test(normalized)) {
+    return false;
+  }
   try {
-    return parseDeskNetsTask(prompt).type === "find_availability";
+    return parseDeskNetsTask(normalized).type === "find_availability";
   } catch {
     return false;
   }
@@ -1626,7 +2090,7 @@ function handleParticipantChoiceReply(
   pendingParticipantChoices.delete(validatedInput.threadId);
   const participants = pending.task.participants.map((participant, index) =>
     index === pending.participantIndex
-      ? { ...participant, organization: matchedOrganization }
+      ? { ...participant, organization: matchedOrganization, organizationFallback: false }
       : participant,
   );
   const resumed: BrowserRun = {

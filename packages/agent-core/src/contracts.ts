@@ -38,6 +38,7 @@ export interface RunStep {
 }
 
 export interface CreateRunInput {
+  conversationHistory?: Array<{ role: "user" | "assistant"; content: string }>;
   userId: string;
   threadId: string;
   site: "mock" | "desknets";
@@ -48,6 +49,8 @@ export interface CreateRunInput {
 export interface ParticipantSelector {
   name: string;
   organization?: string;
+  /** Self-department preference only: search company-wide if no local match. */
+  organizationFallback?: boolean;
 }
 
 export interface FindAvailabilityTask {
@@ -58,9 +61,16 @@ export interface FindAvailabilityTask {
   durationMinutes: number;
   facilityQuery?: string;
   title?: string;
+  /** Offer up to five chronological choices, marking the first as earliest. */
+  selectionMode?: "earliest";
 }
 
 export interface BookMeetingTask {
+  /** Recheck rooms for the saved meeting; never submit the final registration. */
+  facilityOnlyChange?: boolean;
+  previousFacilityId?: string;
+  facilityScope?: string;
+  excludePreviousFacility?: boolean;
   type: "book_meeting";
   facilityQuery?: string;
   title: string;
@@ -100,6 +110,7 @@ export interface ShowCandidatesTask {
 }
 
 export type DeskNetsTask =
+  | { type: "clarify"; question: string }
   | FindAvailabilityTask
   | ChangeAvailabilityDurationTask
   | FindFacilityAvailabilityTask
@@ -130,6 +141,9 @@ export interface PendingParticipantChoice {
 }
 
 export interface PendingBookingContext {
+  selectionMode?: "earliest";
+  originalAvailability?: BookableAvailabilitySlot[];
+  originalAllFacilityAvailability?: BookableAvailabilitySlot[];
   date: string;
   endDate?: string;
   durationMinutes: number;
@@ -209,6 +223,7 @@ export interface BrowserRun {
     meetingProposal?: MeetingProposal;
     approvalRequest?: BookingApprovalRequest;
     manualActionRequest?: ManualBookingActionRequest;
+    facilityAlternatives?: string[];
     booking?: BookingResult;
   };
   error?: string;

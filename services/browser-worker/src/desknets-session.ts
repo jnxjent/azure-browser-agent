@@ -1,8 +1,10 @@
 import { constants } from "node:fs";
-import { access, mkdir, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { resolve } from "node:path";
+import { chromium } from "playwright";
+import { ensureSingleDeskNetsTab } from "./desknets-tabs.js";
 
 const usage = `Usage:
   npm run auth:desknets -- https://your-desknets.example/path
@@ -30,6 +32,17 @@ const edgeExecutable =
   process.env.EDGE_EXECUTABLE_PATH ??
   "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 
+// Running the login command again must reuse Edge rather than launch it with
+// another URL argument (which opens a duplicate tab in an existing profile).
+const existingSession = await fetch(`http://127.0.0.1:${port}/json/version`, {
+  signal: AbortSignal.timeout(2_000),
+}).then((response) => response.ok).catch(() => false);
+if (existingSession) {
+  await reuseScheduleTab();
+  console.log(`既存のDeskNet's専用Edgeを再利用しました（ポート${port}）。`);
+  process.exit(0);
+}
+
 await access(edgeExecutable, constants.X_OK);
 await mkdir(profileDirectory, { recursive: true });
 
@@ -39,10 +52,12 @@ const edge = spawn(
     `--remote-debugging-address=127.0.0.1`,
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDirectory}`,
-    startUrl.href,
+    "about:blank",
   ],
-  { stdio: "inherit", windowsHide: false },
+  // The interactive browser must outlive this command and its terminal.
+  { stdio: "ignore", detached: true, windowsHide: false },
 );
+edge.unref();
 
 const exited = once(edge, "exit").then(([code, signal]) => ({
   code: typeof code === "number" ? code : null,
@@ -65,18 +80,17 @@ if (edgeProcessId === undefined) {
   throw new Error("Could not determine the dedicated Edge process ID.");
 }
 await writeFile(processIdFile, `${edgeProcessId}\n`, "utf8");
-const nativeSignInClicked = await clickNativeEdgeSignIn(edgeProcessId);
-if (nativeSignInClicked) {
-  console.log("Clicked the dedicated Edge native sign-in prompt.");
+const needsManualAuthentication = await reuseScheduleTab();
+if (!needsManualAuthentication) {
+  // A native prompt is optional; failure to inspect it must not terminate Edge.
+  await clickNativeEdgeSignIn(edgeProcessId).catch(() => {
+    console.log("Edgeのサインイン画面が表示されている場合は手動で操作してください。");
+  });
 }
 
 console.log(`DeskNet's Edge session is ready at http://127.0.0.1:${port}.`);
 console.log("Log in manually and leave this Edge window open while the PoC is running.");
-const result = await exited;
-await unlink(processIdFile).catch(() => undefined);
-if (result.code !== 0 && result.code !== null) {
-  process.exitCode = result.code;
-}
+console.log("起動コマンドは終了します。専用Edgeは独立して動作しますので、ウィンドウを開いたままにしてください。");
 
 async function waitForDevTools(portNumber: number): Promise<void> {
   const endpoint = `http://127.0.0.1:${portNumber}/json/version`;
@@ -91,6 +105,38 @@ async function waitForDevTools(portNumber: number): Promise<void> {
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
   throw new Error(`Edge DevTools endpoint did not become ready: ${endpoint}`);
+}
+
+async function reuseScheduleTab(): Promise<boolean> {
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  let needsManualAuthentication = false;
+  try {
+    let page = await ensureSingleDeskNetsTab(browser, [startUrl.hostname]);
+    if (page === undefined) {
+      const context = browser.contexts()[0];
+      if (context === undefined) throw new Error("専用Edgeのブラウザコンテキストが見つかりません。");
+      page = context.pages().find((candidate) => candidate.url() === "about:blank") ?? await context.newPage();
+      try {
+        const response = await page.goto(startUrl.href);
+        needsManualAuthentication = response?.status() === 401 || response?.status() === 407;
+      } catch (error) {
+        if (!(error instanceof Error) || !/net::ERR_(?:INVALID_AUTH_CREDENTIALS|MISSING_AUTH_CREDENTIALS)/.test(error.message)) {
+          throw error;
+        }
+        needsManualAuthentication = true;
+      }
+    }
+    await page.bringToFront();
+    if (needsManualAuthentication) {
+      console.log("DeskNet'sへのアクセスに認証が必要です。専用Edgeは開いたままにします。");
+      console.log(`専用Edgeのアドレスバーに次のURLを貼り付けてEnterを押し、表示される認証画面を手動で操作してください: ${startUrl.href}`);
+      console.log("認証情報はチャットや.env.localに入力せず、ブラウザの認証画面で入力してください。");
+    }
+    return needsManualAuthentication;
+  } finally {
+    // For a CDP connection this disconnects Playwright; Edge stays running.
+    await browser.close();
+  }
 }
 
 async function clickNativeEdgeSignIn(processId: number): Promise<boolean> {

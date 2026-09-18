@@ -32,7 +32,14 @@ export function validateCreateRunInput(value: unknown): CreateRunInput {
     throw new TypeError("mode must be either 'read' or 'write'.");
   }
 
-  return { userId, threadId, site, prompt, mode };
+  const history = value.conversationHistory;
+  if (history !== undefined && (!Array.isArray(history) || history.length > 100 || history.some(
+    (message) => !isRecord(message) || !["user", "assistant"].includes(String(message.role)) ||
+      typeof message.content !== "string" || message.content.length > 12000,
+  ))) throw new TypeError("conversationHistory must contain at most 100 user/assistant messages.");
+  return { userId, threadId, site, prompt, mode,
+    ...(history === undefined ? {} : { conversationHistory: history as NonNullable<CreateRunInput["conversationHistory"]> }),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

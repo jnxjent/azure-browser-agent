@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { resolveSelfOrganizationParticipants } from "./desknets-participants.js";
+import { resolveSelfOrganizationParticipants, preferParticipantOrganization } from "./desknets-participants.js";
+import { companyHolidayDates } from "./desknets-holidays.js";
 
 describe("resolveSelfOrganizationParticipants", () => {
   it("replaces self-department expressions with the logged-in user's DeskNet's organization", () => {
@@ -10,7 +11,7 @@ describe("resolveSelfOrganizationParticipants", () => {
           [{ name: "甲斐", organization: reference }],
           "CP部",
         ),
-        [{ name: "甲斐", organization: "CP部" }],
+        [{ name: "甲斐", organization: "CP部", organizationFallback: true }],
       );
     }
   });
@@ -29,4 +30,29 @@ describe("resolveSelfOrganizationParticipants", () => {
       /所属部署をDeskNet'sから取得できない/,
     );
   });
+});
+
+it("prefers 当部 for the list, falls back company-wide only when absent, and keeps ambiguity", () => {
+  const selectors = resolveSelfOrganizationParticipants([
+    { name: "髙田", organization: "当部" }, { name: "鈴木清彦" },
+    { name: "佐藤", organization: "総務部" },
+  ], "経営企画部");
+  assert.equal(selectors[1]?.organization, "経営企画部");
+  const external = [{ organization: "営業部" }, { organization: "管理部" }];
+  assert.deepEqual(preferParticipantOrganization(external, selectors[1]!), external);
+  const local = { organization: "経営企画部" };
+  assert.deepEqual(preferParticipantOrganization([...external, local], selectors[1]!), [local]);
+  assert.deepEqual(preferParticipantOrganization(external, selectors[2]!), []);
+  const resolved = resolveSelfOrganizationParticipants([{name: "鈴木清彦", organization: "経営企画部"}], "経営企画部", "当部の髙田部長、鈴木清彦部長");
+  assert.equal(resolved[0]?.organizationFallback, true);
+});
+
+it("excludes official company holidays including weekdays, without assuming every weekend is closed", () => {
+  assert.deepEqual([...companyHolidayDates([
+    { date: "20260919", label: "会社休日" },
+    { date: "20260921", label: "会社休日：敬老の日" },
+    { date: "20260922", label: "会社休日：国民の祝日" },
+    { date: "20260923", label: "会議" },
+    { date: "invalid", label: "会社休日" },
+  ])], ["2026-09-19", "2026-09-21", "2026-09-22"]);
 });

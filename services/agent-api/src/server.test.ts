@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { BookableAvailabilitySlot } from "@azure-browser-agent/agent-core";
+import { createRun } from "@azure-browser-agent/agent-core";
 import {
   buildShowCandidatesResponse,
+  getReopenableBookingProposal,
+  buildEarliestCandidatesRun,
+  isEarliestMeetingRequest,
+  inheritAvailabilityPreferences,
+  buildRoomOnlyChangeTask,
   formatFacilityChoiceMessage,
   formatUnavailableFacilityChoiceMessage,
   getCompanyWideAvailability,
@@ -17,6 +23,9 @@ import {
   parseFacilityPreferenceTable,
   resolveFacilityWithPreference,
   resolveAutomaticFacilityForSlot,
+  resolveEarliestPreferredFacility,
+  resizePendingConversationDuration,
+  readRequestedDurationChange,
   resizeBookableAvailability,
   restrictSlotToFacilityType,
   resolveTimeOnlySelection,
@@ -24,6 +33,109 @@ import {
 } from "./server.js";
 
 const START = "2026-08-24T00:30:00.000Z";
+
+it("permits reopening a manual confirmation or retrying a failed handoff, but not active or finished runs", () => {
+  const run = createRun({ userId: "test", threadId: "reopen", site: "desknets", mode: "write", prompt: "再表示" });
+  const proposal = { title: "相談", start: "2099-09-18T01:00:00Z", end: "2099-09-18T02:00:00Z",
+    participantIds: ["本人"], facilityId: "会議室", emailNotificationWillBeSent: false, selfNotificationSuppressed: false as const };
+  run.result = { summary: "prepared", evidence: [], approvalRequest: proposal };
+  run.status = "awaiting_approval";
+  assert.equal(getReopenableBookingProposal(run), proposal);
+  run.result = { summary: "manual confirmation", evidence: [], manualActionRequest: proposal };
+  run.status = "awaiting_user_input";
+  assert.equal(getReopenableBookingProposal(run), proposal);
+  run.approval = { requestedAt: new Date().toISOString(), approvedAt: new Date().toISOString() };
+  run.status = "failed";
+  assert.equal(getReopenableBookingProposal(run), proposal);
+  for (const status of ["queued", "running", "completed", "cancelled"] as const) {
+    run.status = status;
+    assert.equal(getReopenableBookingProposal(run), undefined);
+  }
+  run.status = "awaiting_user_input";
+  run.result = { summary: "needs participant input", evidence: [] };
+  assert.equal(getReopenableBookingProposal(run), undefined);
+});
+
+it("room-only replies inherit selected time, people, title and email without a new interpretation", () => {
+  const selected = {start:"2099-09-18T01:00:00Z",end:"2099-09-18T01:30:00Z",durationMinutes:30,participantIds:["本人","髙田"],availableFacilityIds:["有玉小会議室"]};
+  const saved = {context:{date:"2099-09-18",durationMinutes:30,title:"相談",participantIds:selected.participantIds,availability:[selected]},selectedSlot:selected,facilityId:"有玉大会議室",sendEmail:false};
+  const task = buildRoomOnlyChangeTask("会議室を有玉小会議室に変えて",saved);
+  assert.equal(task?.selectedStart,selected.start);
+  assert.equal(task?.selectedEnd,selected.end);
+  assert.equal(task?.title,"相談");
+  assert.equal(task?.sendEmail,false);
+  assert.equal(task?.facilityScope,"有玉");
+  assert.equal(task?.facilityOnlyChange,true);
+  for (const prompt of ["有玉の会議室", "有玉の会議室で", "有玉の会議室にして", "では、有玉の会議室でお願いします"]) {
+    assert.equal(buildRoomOnlyChangeTask(prompt,saved)?.facilityQuery,"有玉",prompt);
+  }
+  assert.equal(buildRoomOnlyChangeTask("有玉小会議室",saved)?.facilityQuery,"有玉小会議室");
+  const alternative = buildRoomOnlyChangeTask("会議室を、アクトの別会議室に変えて",saved);
+  assert.equal(alternative?.facilityQuery,"アクト");
+  assert.equal(alternative?.excludePreviousFacility,true);
+  assert.equal(buildRoomOnlyChangeTask("明日の10時にして、会議室を有玉小会議室に変えて",saved),undefined);
+  assert.equal(buildRoomOnlyChangeTask("会議室を有玉小会議室に変えて",undefined),undefined);
+  assert.deepEqual(saved.context.participantIds,["本人","髙田"]);
+  const fullWidth = "有玉大会議室　ＡＥＲ～アリア～";
+  const choice = buildRoomOnlyChangeTask(fullWidth, {...saved,
+    context:{...saved.context,availability:[{...selected,availableFacilityIds:[fullWidth]}]},
+    awaitingFacilityChoice:{selectedStart:selected.start,selectedEnd:selected.end,title:"相談",sendEmail:false,facilityScope:"有玉",excludedFacilities:[]},
+  });
+  assert.equal(choice?.facilityQuery,fullWidth);
+  assert.equal(choice?.facilityOnlyChange,true);
+});
+
+describe("earliest candidate choices", () => {
+  it("retains earliest mode and company-wide fallback during model-generated duration refinements", () => {
+    const task = {type:"find_availability" as const,date:"2099-09-21",endDate:"2099-09-27",durationMinutes:30,
+      participants:[{name:"鈴木清彦",organization:"経営企画部"}]};
+    const previous = {...task,selectionMode:"earliest" as const,participantIds:["鈴木清彦"],availability:[],
+      participants:[{name:"鈴木清彦",organization:"経営企画部",organizationFallback:true}]};
+    const next = inheritAvailabilityPreferences(task,previous,"打ち合わせ時間は３０分でいい");
+    assert.equal(next.selectionMode,"earliest");
+    assert.equal(next.participants[0]?.organizationFallback,true);
+    assert.equal(inheritAvailabilityPreferences(task,previous,"経営企画部の鈴木清彦さんで").participants[0]?.organizationFallback,undefined);
+    assert.equal(task.participants[0]?.organization,"経営企画部");
+  });
+  it("recognizes the reported duration refinement as an earliest search", () => {
+    assert.equal(isEarliestMeetingRequest("打ち合わせ時間は３０分でいい。その前提で、もっと前に空きはある？"), true);
+    assert.equal(isEarliestMeetingRequest("もっと早い候補は？"), true);
+    assert.equal(isEarliestMeetingRequest("会議室を変えて"), false);
+  });
+  const makeRun = (availability: BookableAvailabilitySlot[]) => ({
+    ...createRun({ userId: "test", threadId: "earliest-test", site: "desknets", mode: "read", prompt: "最短の日程をあげて" }),
+    result: { summary: "availability", evidence: [], pendingBooking: {
+      date: "2099-09-21", endDate: "2099-09-27", durationMinutes: 60,
+      participantIds: ["本人", "髙田", "鈴木清彦"], availability,
+      allFacilityAvailability: availability,
+    } },
+  });
+  it("offers five chronological choices, labels only the first, and does not book automatically", () => {
+    const slots = Array.from({ length: 7 }, (_, index) => ({
+      start: `2099-09-${21 + index}T01:00:00.000Z`, end: `2099-09-${21 + index}T02:00:00.000Z`,
+      durationMinutes: 60, participantIds: ["本人", "髙田", "鈴木清彦"],
+      availableFacilityIds: ["アクトミーティングルームC"],
+    }));
+    const source = makeRun([...slots].reverse().concat(slots[0]!));
+    const run = buildEarliestCandidatesRun(source);
+    assert.deepEqual(run.result?.availability, slots.slice(0, 5));
+    assert.deepEqual(run.result?.pendingBooking?.availability, slots.slice(0, 5));
+    assert.equal((run.result?.assistantMessage?.match(/＜最短＞/g) ?? []).length, 1);
+    assert.match(run.result!.assistantMessage!, /1\. ＜最短＞/);
+    assert.equal(run.result?.approvalRequest, undefined);
+    assert.equal(run.result?.booking, undefined);
+    assert.equal(run.input.mode, "read");
+    assert.equal(source.result.pendingBooking.availability.length, 8);
+  });
+  it("does not invent five choices when fewer or none are available", () => {
+    const candidate = { start: "2099-09-21T01:00:00Z", end: "2099-09-21T02:00:00Z",
+      durationMinutes: 60, participantIds: ["本人"], availableFacilityIds: ["アクト大会議室"] };
+    assert.equal(buildEarliestCandidatesRun(makeRun([candidate])).result?.availability?.length, 1);
+    const empty = buildEarliestCandidatesRun(makeRun([{ ...candidate, availableFacilityIds: [] }]));
+    assert.deepEqual(empty.result?.availability, []);
+    assert.doesNotMatch(empty.result!.assistantMessage!, /＜最短＞/);
+  });
+});
 const END = "2026-08-24T01:00:00.000Z";
 
 function slot(availableFacilityIds: string[]): BookableAvailabilitySlot {
@@ -75,6 +187,26 @@ describe("restrictSlotToFacilityType", () => {
       ["アクト応接室"],
     );
   });
+
+  it("lets a location-scoped request select only an actual free meeting room", () => {
+    const available = slot([
+      "有玉応接室 STELLA",
+      "有玉大会議室 AER",
+      "アクト大会議室",
+    ]);
+    const meetingRooms = restrictSlotToFacilityType(available, "meeting_room");
+    assert.equal(
+      resolveAutomaticFacilityForSlot(
+        "有玉",
+        meetingRooms,
+        undefined,
+        undefined,
+        {},
+        {},
+      ),
+      "有玉大会議室 AER",
+    );
+  });
 });
 
 describe("getCompanyWideAvailability", () => {
@@ -121,6 +253,47 @@ describe("resizeBookableAvailability", () => {
       false,
     );
   });
+
+  it("applies a duration refinement to the saved thread before resolving its time", () => {
+    const sixtyMinuteSlot = {
+      ...slot(["アクトミーティングルームC", "アクト第2会議室"]),
+      end: "2026-08-24T01:30:00.000Z",
+      durationMinutes: 60,
+    };
+    const conversation = resizePendingConversationDuration({
+      context: {
+        date: "2026-08-24",
+        endDate: "2026-08-24",
+        durationMinutes: 60,
+        participantIds: ["u1"],
+        availability: [sixtyMinuteSlot],
+        allFacilityAvailability: [sixtyMinuteSlot],
+      },
+    }, 30);
+    assert.equal(conversation.context.durationMinutes, 30);
+    assert.equal(conversation.context.availability[0]?.end, END);
+    assert.equal(
+      resolveTimeOnlySelection(
+        "では8/24の9:30開始で。会議時間は30分でいい。",
+        conversation.context,
+      )?.end,
+      END,
+    );
+  });
+});
+
+describe("readRequestedDurationChange", () => {
+  it("does not mistake clock minutes for a requested meeting duration", () => {
+    assert.equal(readRequestedDurationChange(undefined, "16時30分開始で"), undefined);
+    assert.equal(readRequestedDurationChange(undefined, "16時開始で1時間半"), 90);
+    assert.equal(readRequestedDurationChange(undefined, "60分"), 60);
+  });
+  it("keeps a duration embedded in the same time-selection reply", () => {
+    assert.equal(
+      readRequestedDurationChange(undefined, "では9/16 15:30開始で。会議時間は30分でいい。"),
+      30,
+    );
+  });
 });
 
 describe("isRunOwnerRequest", () => {
@@ -155,6 +328,22 @@ describe("isRunOwnerRequest", () => {
 });
 
 describe("resolveTimeOnlySelection", () => {
+  it("resolves the reported full-width reply with the saved duration and participants", () => {
+    const candidate = {
+      ...slot(["アクトミーティングルームC"]),
+      start: "2026-09-16T07:00:00.000Z", end: "2026-09-16T08:00:00.000Z", durationMinutes: 60,
+    };
+    const context = {
+      date: "2026-09-16", endDate: "2026-09-22", durationMinutes: 60,
+      participantIds: ["u1"], availability: [candidate],
+    };
+    for (const reply of ["では９/１６, １６時開始で", "9/16 午後4時で", "9/16 16:00で"]) {
+      assert.deepEqual(resolveTimeOnlySelection(reply, context), candidate, reply);
+    }
+    assert.deepEqual(resolveTimeOnlySelection("60分", context, {
+      date: "2026-09-16", startTime: "16:00", endTime: null,
+    }), candidate);
+  });
   const afternoonSlot = {
     ...slot(["アクト会議室A"]),
     start: "2026-09-14T06:00:00.000Z",
@@ -201,6 +390,52 @@ describe("resolveTimeOnlySelection", () => {
       halfHourSlot.end,
     );
   });
+
+  it("uses an explicit date and Japanese half-hour when the same time exists on multiple days", () => {
+    const september14 = {
+      ...halfHourSlot,
+      start: "2026-09-14T02:30:00.000Z",
+      end: "2026-09-14T03:00:00.000Z",
+    };
+    const september15 = {
+      ...halfHourSlot,
+      start: "2026-09-15T02:30:00.000Z",
+      end: "2026-09-15T03:00:00.000Z",
+    };
+    assert.equal(
+      resolveTimeOnlySelection(
+        "では、9/15の11時半スタートで。会議室はアクト応接室にして",
+        {
+          ...context,
+          endDate: "2026-09-15",
+          durationMinutes: 30,
+          availability: [september14, september15],
+        },
+      )?.start,
+      september15.start,
+    );
+  });
+
+  it("uses the validated AzureChat date and time when the raw follow-up has no parseable time", () => {
+    const september15 = {
+      ...halfHourSlot,
+      start: "2026-09-15T02:30:00.000Z",
+      end: "2026-09-15T03:00:00.000Z",
+    };
+    assert.equal(
+      resolveTimeOnlySelection(
+        "では、その時間で。会議室はアクト応接室にして",
+        {
+          ...context,
+          endDate: "2026-09-15",
+          durationMinutes: 30,
+          availability: [september15],
+        },
+        { date: "2026-09-15", startTime: "11:30", endTime: null },
+      )?.start,
+      september15.start,
+    );
+  });
 });
 
 describe("resolveAutomaticFacilityForSlot", () => {
@@ -213,6 +448,56 @@ describe("resolveAutomaticFacilityForSlot", () => {
         undefined,
       ),
       "アクトミーティングルームC",
+    );
+  });
+});
+
+describe("resolveEarliestPreferredFacility", () => {
+  const earliest = {
+    ...slot(["品川会議室", "アクト第2会議室"]),
+    start: "2099-09-17T00:00:00.000Z",
+    end: "2099-09-17T01:00:00.000Z",
+  };
+  const later = {
+    ...slot(["アクトミーティングルームC"]),
+    start: "2099-09-17T01:00:00.000Z",
+    end: "2099-09-17T02:00:00.000Z",
+  };
+
+  it("prioritizes the earliest time, then the configured room order", () => {
+    const result = resolveEarliestPreferredFacility(
+      [later, earliest],
+      "経営企画部",
+      undefined,
+      {},
+      { "経営企画部": ["アクトミーティングルームC", "アクト"] },
+    );
+    assert.equal(result?.slot.start, earliest.start);
+    assert.equal(result?.facilityId, "アクト第2会議室");
+  });
+
+  it("uses a persisted user preference before the department default", () => {
+    const result = resolveEarliestPreferredFacility(
+      [{ ...earliest, availableFacilityIds: ["有玉大会議室", "アクト第2会議室"] }],
+      "経営企画部",
+      undefined,
+      {},
+      { "経営企画部": ["アクト"] },
+      ["有玉"],
+    );
+    assert.equal(result?.facilityId, "有玉大会議室");
+  });
+
+  it("returns undefined instead of guessing outside the preference list", () => {
+    assert.equal(
+      resolveEarliestPreferredFacility(
+        [{ ...earliest, availableFacilityIds: ["品川会議室"] }],
+        "経営企画部",
+        undefined,
+        {},
+        { "経営企画部": ["アクト"] },
+      ),
+      undefined,
     );
   });
 });
@@ -245,7 +530,16 @@ describe("resolveFacilityWithPreference", () => {
   it("rejects a preference that partially matches more than one available facility", () => {
     const availability = [slot(["アクトミーティングルームC", "品川ミーティングルームC"])];
     assert.throws(
-      () => resolveFacilityWithPreference(undefined, availability, "経営企画部", undefined, START, END),
+      () => resolveFacilityWithPreference(
+        undefined,
+        availability,
+        "経営企画部",
+        undefined,
+        START,
+        END,
+        {},
+        { "経営企画部": ["ミーティングルームC"] },
+      ),
       /複数の設備に一致/,
     );
   });

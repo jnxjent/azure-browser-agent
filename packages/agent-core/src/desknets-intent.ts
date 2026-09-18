@@ -20,7 +20,7 @@ const PARTICIPANT_TITLE =
   "(?:代表取締役|執行役員|取締役|副社長|本部長|支店長|副部長|副支店長|部長|次長|課長|室長|所長|係長|主任|専務|常務|マネージャー|リーダー)";
 const PARTICIPANT_SUFFIX = `(?:さん|${PARTICIPANT_TITLE})`;
 const PARTICIPANT_WITH_ORGANIZATION = new RegExp(
-  `(?:^|[\\s、,，・]|と)(?:(${ORGANIZATION_NAME})の)?([々一-龯髙﨑]{1,12}?)(?:${PARTICIPANT_SUFFIX})?(?=$|[\\s、,，・]|と|で|だけ|[がはをに]|の(?:空き|予定|今日|明日|今週|来週))`,
+  `(?:^|[\\s、,，・]|と)(?:(${ORGANIZATION_NAME})の)?([々一-龯髙﨑]{1,12}?)(?:${PARTICIPANT_SUFFIX})?(?=$|[\\s、,，・]|と|で|だけ|[がはをに]|の(?:空き|予定|打ち合わせ|会議|直近|最短|一番早|最も早|今日|明日|今週|来週))`,
   "g",
 );
 const PARTICIPANT_SUFFIX_AT_END = new RegExp(`${PARTICIPANT_SUFFIX}$`);
@@ -63,7 +63,7 @@ export function parseDeskNetsTask(
     return { type: "show_candidates" };
   }
 
-  if (/^(?:はい|お願いします|送信します|送信する)[。！!]?$/.test(normalized)) {
+  if (/^(?:はい|お願いします|送信します|送信する|送信で|メール送信で|メールを?送信(?:して|で)?)[。！!]?$/.test(normalized)) {
     return { type: "set_email_notification", sendEmail: true };
   }
   if (/^(?:いいえ|不要です|送信しません|送信しない)[。！!]?$/.test(normalized)) {
@@ -112,6 +112,9 @@ export function parseDeskNetsTask(
     durationMinutes: durationMinutes ?? 60,
     ...(facilityQuery === undefined ? {} : { facilityQuery }),
     ...(title === undefined ? {} : { title }),
+    ...(/(?:直近|最短|一番早|最も早)/.test(normalized)
+      ? { selectionMode: "earliest" as const }
+      : {}),
   };
 }
 
@@ -194,14 +197,18 @@ function readOptionalFacilityQuery(prompt: string): string | undefined {
   }
   const bareFacility = prompt.match(BARE_FACILITY_NAME);
   if (bareFacility?.[1] !== undefined && bareFacility[1].trim() !== "") {
-    return bareFacility[1].trim();
+    const candidate = bareFacility[1].trim();
+    if (PARTICIPANT_SUFFIX_AT_END.test(candidate) || NON_PARTICIPANT_WORDS.has(candidate)) return undefined;
+    return candidate;
   }
   return undefined;
 }
 
 function readEmailNotification(prompt: string): boolean {
   if (/メール.*(?:送信|発信).*(?:しない|不要|なし)/.test(prompt)) return false;
-  return /メール.*(?:送信|発信)/.test(prompt);
+  // Email and notification to the requesting user are the safe operational
+  // defaults. An explicit opt-out still takes precedence.
+  return true;
 }
 
 function readMeetingTitle(prompt: string): string | undefined {
@@ -212,12 +219,15 @@ function readMeetingTitle(prompt: string): string | undefined {
   return title === undefined || title === "" ? undefined : title;
 }
 
-function readDurationMinutes(prompt: string): number | undefined {
-  const hours = prompt.match(/(\d{1,2})\s*時間(?:\s*(\d{1,2})\s*分)?/);
-  const minutes = hours === null ? prompt.match(/(\d{1,3})\s*分(?:間)?/) : null;
+/** Read a duration, excluding the minutes belonging to a clock time. */
+export function readDurationMinutes(prompt: string): number | undefined {
+  const durationText = prompt.normalize("NFKC")
+    .replace(/\d{1,2}\s*時(?!間)(?:\s*\d{1,2}\s*分|\s*半)?/g, " ");
+  const hours = durationText.match(/(?<!\d)(\d+)\s*時間(?:\s*(半)|\s*(\d+)\s*分)?/);
+  const minutes = hours === null ? durationText.match(/(?<!\d)(\d+)\s*分(?:間)?/) : null;
   if (hours === null && minutes === null) return undefined;
   const value = hours !== null
-    ? Number.parseInt(hours[1] ?? "0", 10) * 60 + Number.parseInt(hours[2] ?? "0", 10)
+    ? Number(hours[1]) * 60 + (hours[2] ? 30 : Number(hours[3] ?? 0))
     : Number.parseInt(minutes?.[1] ?? "0", 10);
   if (!Number.isSafeInteger(value) || value < 30 || value > 480) {
     throw new TypeError("打ち合わせ時間は30分から480分の範囲で指定してください。");
@@ -313,6 +323,14 @@ function readDateRange(
     const daysUntilNextMonday = 8 - (day === 0 ? 7 : day);
     const date = addDays(today, daysUntilNextMonday);
     return { date, endDate: addDays(date, 6) };
+  }
+
+  // A natural request such as "髙田部長との打ち合わせ可能な日程を教えて"
+  // should work without making the user restate today's date. Search from the
+  // current Japan date through the next six calendar days; same-day slots that
+  // have already started are removed later using the exact current instant.
+  if (!/(?:20\d{2}年)?\d{1,2}月\d{1,2}日|\d{1,2}[/.]\d{1,2}/.test(prompt)) {
+    return { date: today, endDate: addDays(today, 6) };
   }
 
   const full = prompt.match(/(20\d{2})年(\d{1,2})月(\d{1,2})日/);

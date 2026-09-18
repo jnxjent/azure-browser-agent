@@ -36,9 +36,10 @@ describe("assertActionAllowed", () => {
     );
   });
 
-  it("allows the final Add only after explicit approval", () => {
-    assert.doesNotThrow(() =>
-      assertActionAllowed({ type: "click", target: "追加" }, limits, "write", true),
+  it("rejects the final Add even after the AzureChat preparation approval", () => {
+    assert.throws(
+      () => assertActionAllowed({ type: "click", target: "追加" }, limits, "write"),
+      PolicyViolationError,
     );
   });
 });
