@@ -34,6 +34,7 @@ import { resolveLiveRoomChange } from "./room-change.js";
 import { ensureSingleDeskNetsTab } from "./desknets-tabs.js";
 import { openFacilityDialog } from "./desknets-facility-dialog.js";
 import { assertFacilityAvailable } from "./desknets-facility-conflicts.js";
+import { participantResultsTable, participantResultsBaseline } from "./desknets-participant-results.js";
 
 interface DeskNetsWorkerOptions {
   cdpEndpoint?: string;
@@ -864,11 +865,8 @@ async function selectParticipant(
   const keyField = dialog.locator('input[name="key"]:visible').first();
   if ((await keyField.count()) === 1) await keyField.fill("");
 
-  // The results table exists in the DOM (possibly hidden, e.g. before the
-  // first search of this dialog session) even when no search has run yet, so
-  // read its baseline content without requiring visibility first.
-  const resultsTable = dialog.locator(".co-sel-list-scroll table.co-sel-table-list");
-  const previousResultsHtml = await resultsTable.innerHTML().catch(() => "");
+  const resultsTable = participantResultsTable(dialog);
+  const previousResultsHtml = await participantResultsBaseline(resultsTable);
   // Clicking the search form's submit input does not reliably submit the name
   // search (it can land on an unrelated default listing); pressing Enter in the
   // name field submits the correct form.

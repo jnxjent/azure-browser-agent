@@ -12,7 +12,7 @@
     "build": "tsc --build",
     "check": "tsc --build --pretty false",
     "auth:desknets": "node --enable-source-maps --env-file=../../.env.local dist/desknets-session.js",
-    "test": "node --test dist/desknets-timeline.test.js dist/desknets-facilities.test.js dist/desknets-dom.test.js dist/desknets-participants.test.js dist/desknets-appointments.test.js dist/desknets-tabs.test.js dist/desknets-facility-conflicts.test.js dist/meeting-hours.test.js dist/desknets-navigation.test.js dist/desknets-reopen.test.js",
+    "test": "node --test dist/desknets-timeline.test.js dist/desknets-facilities.test.js dist/desknets-dom.test.js dist/desknets-participants.test.js dist/desknets-appointments.test.js dist/desknets-tabs.test.js dist/desknets-facility-conflicts.test.js dist/meeting-hours.test.js dist/desknets-navigation.test.js dist/desknets-reopen.test.js dist/desknets-participant-results.test.js",
     "clean": "tsc --build --clean"
   },
   "keywords": [],
