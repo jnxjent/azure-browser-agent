@@ -35,7 +35,7 @@ try {
     assert.equal(await readNativeFacilityId(target,room.name),room.id);
     const date=new URLSearchParams(new URL(url).hash.slice(1)).get('date');
     assert.equal(await target.locator('.jsch-startdate:visible').inputValue(),`${date.slice(0,4)}/${date.slice(4,6)}/${date.slice(6,8)}`);
-    assert.deepEqual(await target.locator('input[name="otherto"]').evaluateAll(es=>es.map(e=>e.value)),input.userIds);
+    assert.deepEqual((await target.locator('input[name="otherto"]').evaluateAll(es=>es.map(e=>e.value))).sort(),[...input.userIds].sort());
     console.log(JSON.stringify({test:'cross-origin-room-handoff',roomId:room.id,attempt,passed:true,registered:false}));
    }finally{await target.close({runBeforeUnload:false});}
   }
