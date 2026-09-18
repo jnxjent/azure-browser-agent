@@ -544,6 +544,13 @@ async function executeBookingRun(
   );
 
   await fillBookingForm(page, task, slot, facilityId, selectedDate);
+  // Capture IDs only after verifying the visible form matches the selected people.
+  await assertBookingFormMatches(page, task, slot, facilityId, selectedDate, pending.participantIds);
+  const nativeUserIds = await page.locator('input[name="otherto"]').evaluateAll(elements =>
+    elements.map(element => (element as HTMLInputElement).value));
+  const verifiedNativeUserIds = nativeUserIds.length === pending.participantIds.length &&
+    new Set(nativeUserIds).size === nativeUserIds.length && nativeUserIds.every(id => /^\d{1,20}$/.test(id))
+    ? nativeUserIds : undefined;
   if (task.facilityOnlyChange) {
     await assertBookingFormMatches(page, task, slot, facilityId, selectedDate, pending.participantIds);
     const observation = await observe(page,run.id,"after.png",artifactDirectory,"Changed only the room; preserved the saved meeting.",["Date and time","Participants","Facility"]);
@@ -595,6 +602,7 @@ async function executeBookingRun(
       assistantMessage: `以下の内容を確認し、AzureChatのオレンジのボタンを押してください。DeskNet'sの予定追加画面を表示します。メール送信は${task.sendEmail ? "オン" : "オフ"}、本人への通知はオンです。DeskNet's上の「追加」を手動で押すまで予定は登録されません。`,
       evidence: [observationBefore.screenshotRef],
       approvalRequest: {
+        ...(verifiedNativeUserIds ? {nativeUserIds:verifiedNativeUserIds} : {}),
         title: task.title,
         start: slot.start,
         end: slot.end,

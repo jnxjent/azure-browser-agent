@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   createRun,
+  buildDeskNetsHandoffUrl,
   analyzeDeskNetsIntent,
   readAzureOpenAIIntentConfig,
   filterFutureAvailability,
@@ -843,6 +844,26 @@ async function route(
       sendJson(response, 403, {
         error: "This run does not belong to the current user or chat thread.",
       });
+      return;
+    }
+
+    if (request.method === "GET" && segments.length === 4 && segments[3] === "handoff") {
+      const approval = run.result?.approvalRequest;
+      const age = Date.now() - Date.parse(run.createdAt);
+      const superseded = Array.from(runs.values()).some(other => other.id !== run.id &&
+        other.input.userId === run.input.userId && other.input.threadId === run.input.threadId &&
+        Date.parse(other.createdAt) > Date.parse(run.createdAt));
+      if (superseded || run.status !== "awaiting_approval" || !approval?.nativeUserIds || !Number.isFinite(age) || age < 0 || age > 15*60*1000) {
+        sendJson(response, 409, {message:"この候補は引き渡しできないか期限切れです。候補を再作成してください。"});
+        return;
+      }
+      try {
+        const handoffUrl=buildDeskNetsHandoffUrl({start:approval.start,end:approval.end,userIds:approval.nativeUserIds});
+        response.setHeader("Cache-Control","no-store");
+        sendJson(response,200,{handoffUrl,status:"awaiting_native_confirmation",registered:false});
+      } catch(error) {
+        sendJson(response,409,{message:error instanceof Error ? error.message : "引き渡しに失敗しました。"});
+      }
       return;
     }
 

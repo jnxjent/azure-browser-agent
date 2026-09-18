@@ -171,6 +171,8 @@ export interface BookingResult {
 }
 
 export interface BookingApprovalRequest {
+  /** Verified native user IDs, not the legacy participantIds display names. */
+  nativeUserIds?: string[];
   title: string;
   start: string;
   end: string;

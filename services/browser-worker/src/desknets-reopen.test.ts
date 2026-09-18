@@ -9,7 +9,7 @@ const fixture = `<!doctype html><meta charset="utf-8">
 <div id="list"><span>氏名/組織名</span><input type="checkbox"><a class="jsch-btn-add" href="#"
  onclick="document.getElementById('list').hidden=true;document.getElementById('form').hidden=false;return false">予定追加</a></div>
 <div id="form" hidden>
- <span>本人</span><input class="jsch-startdate"><input class="jsch-enddate"><input name="detail">
+ <span>本人</span><input type="hidden" name="otherto" value="123"><input class="jsch-startdate"><input class="jsch-enddate"><input name="detail">
  ${[0, 1].map(() => `<select class="co-timepicker-hour">${Array.from({length:24},(_,i)=>`<option>${i}時</option>`).join("")}</select>
  <select class="co-timepicker-minute"><option>0分</option><option>30分</option></select>`).join("")}
  <a href="#" class="jsch-entry-target-chooser" onclick="document.getElementById('people').hidden=false;return false">登録先</a>
@@ -50,6 +50,7 @@ test("orange-button handoff recreates a closed tab and restores all booking fiel
     run.context = {date:"2099-09-18",durationMinutes:30,participants:[],participantIds:["本人"],availability:[slot]};
     let prepared = await worker.execute(run, new AbortController().signal);
     assert.equal(prepared.status,"awaiting_approval");
+    assert.deepEqual(prepared.result?.approvalRequest?.nativeUserIds,["123"]);
     // Both the first approval after closing and a subsequent re-display recover.
     for (let attempt=0;attempt<2;attempt++) {
       await context.pages()[0]!.close();
