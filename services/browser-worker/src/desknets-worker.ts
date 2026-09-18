@@ -539,6 +539,7 @@ async function executeBookingRun(
           : "DeskNet'sの予定追加画面を準備しました。専用EdgeをAlt + Tabで表示し、内容を確認して「追加」を手動で押してください。Agentは予定を登録していません。",
         evidence: [observationBefore.screenshotRef],
         manualActionRequest: {
+          nativeFacilityId: await readNativeFacilityId(page, facilityId),
           ...(run.result?.approvalRequest?.nativeUserIds ? {nativeUserIds:run.result.approvalRequest.nativeUserIds} : {}),
           title: task.title,
           start: slot.start,
@@ -567,6 +568,7 @@ async function executeBookingRun(
   const verifiedNativeUserIds = nativeUserIds.length === pending.participantIds.length &&
     new Set(nativeUserIds).size === nativeUserIds.length && nativeUserIds.every(id => /^\d{1,20}$/.test(id))
     ? nativeUserIds : undefined;
+  const nativeFacilityId = await readNativeFacilityId(page, facilityId);
   if (task.facilityOnlyChange) {
     await assertBookingFormMatches(page, task, slot, facilityId, selectedDate, pending.participantIds);
     const observation = await observe(page,run.id,"after.png",artifactDirectory,"Changed only the room; preserved the saved meeting.",["Date and time","Participants","Facility"]);
@@ -574,7 +576,7 @@ async function executeBookingRun(
     return {...run,status:"awaiting_user_input",updatedAt:new Date().toISOString(),result:{
       summary:"Displayed the changed room for manual final confirmation.",
       assistantMessage:"日時・参加者・会議時間を引き継ぎ、会議室を変更したDeskNet's画面を表示しました。最終登録はDeskNet'sの「追加」を手動で押してください。",
-      evidence:[observation.screenshotRef],manualActionRequest:{...(verifiedNativeUserIds ? {nativeUserIds:verifiedNativeUserIds} : {}),title:task.title,start:slot.start,end:slot.end,
+      evidence:[observation.screenshotRef],manualActionRequest:{nativeFacilityId,...(verifiedNativeUserIds ? {nativeUserIds:verifiedNativeUserIds} : {}),title:task.title,start:slot.start,end:slot.end,
         participantIds:pending.participantIds,facilityId,emailNotificationWillBeSent:task.sendEmail,selfNotificationSuppressed:false},
     }};
   }
@@ -618,6 +620,7 @@ async function executeBookingRun(
       assistantMessage: `以下の内容を確認し、AzureChatのオレンジのボタンを押してください。DeskNet'sの予定追加画面を表示します。メール送信は${task.sendEmail ? "オン" : "オフ"}、本人への通知はオンです。DeskNet's上の「追加」を手動で押すまで予定は登録されません。`,
       evidence: [observationBefore.screenshotRef],
       approvalRequest: {
+        nativeFacilityId,
         ...(verifiedNativeUserIds ? {nativeUserIds:verifiedNativeUserIds} : {}),
         title: task.title,
         start: slot.start,
@@ -1025,6 +1028,17 @@ async function fillBookingForm(
   if (await suppressSelfNotificationCheckbox.isChecked()) {
     await suppressSelfNotificationCheckbox.uncheck();
   }
+}
+
+export async function readNativeFacilityId(page: Page, facilityName: string): Promise<string | undefined> {
+  const selected = await page.locator('.sch-row-plant input[name="pids"]').evaluateAll(elements => elements.map(element => {
+    const input = element as HTMLInputElement;
+    const label = input.closest('.co-selitem')?.querySelector('a[data-pid]');
+    return {id:input.value,label:label?.textContent?.trim(),labelId:label?.getAttribute('data-pid')};
+  }));
+  const room = selected[0];
+  return selected.length === 1 && room && /^\d{1,20}$/.test(room.id) &&
+    room.label === facilityName && room.labelId === room.id ? room.id : undefined;
 }
 
 export async function selectExactFacility(dialog: Locator, facilityId: string): Promise<void> {

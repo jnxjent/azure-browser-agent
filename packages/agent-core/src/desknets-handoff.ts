@@ -1,6 +1,6 @@
 /** Phase1: native screen preparation only; never registration or authentication. */
 export function buildDeskNetsHandoffUrl(input: {
-  start: string; end: string; userIds: string[];
+  start: string; end: string; userIds: string[]; facilityId?: string | undefined;
 }, now = new Date()): string {
   const start = new Date(input.start), end = new Date(input.end);
   if (!Number.isFinite(now.getTime()) || !Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) ||
@@ -18,5 +18,9 @@ export function buildDeskNetsHandoffUrl(input: {
   const s=parts(start), e=parts(end);
   const hash=new URLSearchParams({cmd:'schaddtarget',date:s.date,enddate:e.date,starttime:s.time,endtime:e.time});
   input.userIds.forEach(id=>hash.append('id',id));
+  if (input.facilityId !== undefined) {
+    if (!/^\d{1,20}$/.test(input.facilityId)) throw new Error("会議室の設備IDを確認できません。候補を再作成してください。");
+    hash.set('pid', input.facilityId);
+  }
   return `https://desknets.midac.jp/dneo/dneo.cgi?cmd=schindex#${hash}`;
 }

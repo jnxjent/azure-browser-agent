@@ -4,7 +4,19 @@ import {resolve} from "node:path";
 import {test} from "node:test";
 import {chromium,type Browser} from "playwright";
 import {createRun} from "@azure-browser-agent/agent-core";
-import {DeskNetsBrowserWorker} from "./desknets-worker.js";
+import {DeskNetsBrowserWorker,readNativeFacilityId} from "./desknets-worker.js";
+
+test("room ID is captured only from a single selected room with matching name and ID", async()=>{
+ const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage();
+  const room=(id:string,name:string,labelId=id)=>`<span class="co-selitem"><a data-pid="${labelId}">${name}</a><input name="pids" value="${id}"></span>`;
+  for (const [html,expected] of [[room("13","Room A"),"13"],[room("14","Room A"),"14"],[room("13","Room B"),undefined],[room("13","Room A","14"),undefined],[room("13","Room A")+room("14","Room B"),undefined],["",undefined]] as const) {
+   await page.setContent(`<div class="sch-row-plant">${html}</div>`);
+   assert.equal(await readNativeFacilityId(page,"Room A"),expected);
+  }
+ } finally {await browser.close();}
+});
 
 test("cleanup timeout cannot replace the primary error; both are recorded", async()=>{
  const browser=await chromium.launch({headless:true});

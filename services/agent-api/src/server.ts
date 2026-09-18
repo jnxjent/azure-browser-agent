@@ -884,7 +884,9 @@ async function route(
         return;
       }
       try {
-        const handoffUrl=buildDeskNetsHandoffUrl({start:approval.start,end:approval.end,userIds:approval.nativeUserIds});
+        const nativeFacilityId = "nativeFacilityId" in approval ? approval.nativeFacilityId : undefined;
+        if (approval.facilityId && !nativeFacilityId) throw new Error("会議室の引き渡し情報がありません。候補を選び直してください。");
+        const handoffUrl=buildDeskNetsHandoffUrl({start:approval.start,end:approval.end,userIds:approval.nativeUserIds,facilityId:nativeFacilityId});
         response.setHeader("Cache-Control","no-store");
         sendJson(response,200,{handoffUrl,status:"awaiting_native_confirmation",registered:false});
       } catch(error) {

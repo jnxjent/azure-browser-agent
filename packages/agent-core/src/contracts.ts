@@ -174,6 +174,8 @@ export interface BookingResult {
 }
 
 export interface BookingApprovalRequest {
+  /** Verified DeskNet's equipment ID, not the facility display name. */
+  nativeFacilityId?: string | undefined;
   /** Verified native user IDs, not the legacy participantIds display names. */
   nativeUserIds?: string[];
   title: string;
@@ -185,6 +187,7 @@ export interface BookingApprovalRequest {
 }
 
 export interface ManualBookingActionRequest {
+  nativeFacilityId?: string | undefined;
   nativeUserIds?: string[];
   title: string;
   start: string;

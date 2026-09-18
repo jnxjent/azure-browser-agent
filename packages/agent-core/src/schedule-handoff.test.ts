@@ -18,6 +18,17 @@ test("Phase1 URL preserves three native IDs and JST dates without text or creden
   for(const userIds of [[],["same name"],["1","1"],["1&cmd=delete"]]) assert.throws(()=>buildDeskNetsHandoffUrl({...input,userIds},now));
   assert.throws(()=>buildDeskNetsHandoffUrl({...input,start:"2020-01-01T00:00:00Z"},now));
 });
+test("room handoff uses a validated native equipment ID, never a display name", () => {
+  const input={start:"2026-10-06T05:00:00Z",end:"2026-10-06T06:00:00Z",userIds:["101","102","103"]};
+  for (const facilityId of ["13","14"]) {
+    const hash=new URLSearchParams(new URL(buildDeskNetsHandoffUrl({...input,facilityId},now)).hash.slice(1));
+    assert.deepEqual(hash.getAll("pid"),[facilityId]);
+    assert.deepEqual(hash.getAll("id"),input.userIds);
+  }
+  for(const facilityId of ["", "会議室A", "13&cmd=delete", "13,14", "1".repeat(21)]) {
+    assert.throws(()=>buildDeskNetsHandoffUrl({...input,facilityId},now));
+  }
+});
 function fixture() {
   return draftFromDeskNetsApproval({title:"打ち合わせ",start:"2026-09-19T01:00:00Z",end:"2026-09-19T02:00:00Z",
     participantIds:["本人"],facilityId:"会議室A",emailNotificationWillBeSent:false},
