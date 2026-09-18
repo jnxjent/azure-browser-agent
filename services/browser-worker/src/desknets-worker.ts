@@ -75,6 +75,7 @@ export class DeskNetsBrowserWorker implements RunExecutor {
     const browser = await this.getBrowser();
     let page: Page | undefined;
     let preservePreparedForm = false;
+    let primaryError: unknown;
     try {
       if (run.task === undefined) {
         throw new Error("DeskNet's run does not contain a structured task.");
@@ -127,9 +128,18 @@ export class DeskNetsBrowserWorker implements RunExecutor {
         return completed;
       }
       throw new Error("DeskNet's run does not contain a supported structured task.");
+    } catch (error) {
+      primaryError = error;
+      await recordFailure(artifactDirectory, page, "primary", error);
+      throw error;
     } finally {
       if (page !== undefined && !page.isClosed() && !preservePreparedForm) {
-        await discardPreparedForm(page);
+        try {
+          await discardPreparedForm(page);
+        } catch (cleanupError) {
+          await recordFailure(artifactDirectory, page, "cleanup", cleanupError);
+          if (primaryError === undefined) throw cleanupError;
+        }
       }
     }
   }
@@ -1385,6 +1395,25 @@ async function closeSelectionDialog(page: Page, label: string): Promise<void> {
   await cancel.click();
   await dialog.waitFor({ state: "hidden", timeout: 5_000 });
   await page.waitForTimeout(300);
+}
+
+export async function recordFailure(directory: string, page: Page | undefined, phase: string, error: unknown): Promise<void> {
+  // Diagnostics must never replace the original exception or include credentials.
+  try {
+    const state = page === undefined || page.isClosed() ? null : await Promise.race([page.evaluate(() => {
+      const visible = (e: Element) => (e as HTMLElement).getClientRects().length > 0;
+      return {
+        command: new URLSearchParams(location.hash.slice(1)).get("cmd"),
+        dates: Array.from(document.querySelectorAll<HTMLInputElement>(".jsch-startdate,.jsch-enddate")).map(e => ({value:e.value,visible:visible(e)})),
+        dialogs: Array.from(document.querySelectorAll<HTMLElement>(".ui-dialog")).filter(visible).map(e => e.innerText.slice(0, 1500)),
+      };
+    }).catch(() => null), new Promise<null>(resolve => setTimeout(() => resolve(null), 2000))]);
+    await writeFile(resolve(directory, `failure-${phase}.json`), JSON.stringify({
+      at: new Date().toISOString(), phase, message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined, state,
+    }, null, 2), {encoding:"utf8",mode:0o600});
+    if (page !== undefined && !page.isClosed()) await page.screenshot({path:resolve(directory,`failure-${phase}.png`),timeout:3000}).catch(() => {});
+  } catch { /* Failure reporting is best-effort. */ }
 }
 
 export async function discardPreparedForm(page: Page): Promise<void> {
