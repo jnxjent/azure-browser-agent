@@ -19,6 +19,23 @@
 
 ## Latest successful deployment (after MFA and interactive login)
 
+### Participant search correction
+
+- Deployed `64a881fd6bf80aa42eb715054b1377ae4444f48d` after a participant
+  search failed with a strict locator violation.
+- Read-only VM DOM inspection confirmed two matching tables: one under
+  `.co-sel-search.co-sel-chooser-items`, the other under
+  `.co-sel-groups.co-sel-chooser-items`. The dialog was closed at inspection time.
+- The worker now selects only visible search-results tables. It does not choose
+  the first match when multiple search tables exist. Initial empty/hidden results
+  are read without waiting before submitting the search.
+- Added browser regression coverage for first/repeated searches, hidden group
+  listings, reversed DOM order, visible group listings and ambiguous search tables.
+  Full `npm test` passed; VM dependency installation, build and health passed.
+- TestSite SCM-to-VM health probe returned HTTP 200 after deployment.
+  Actual participant search must be retried from TestSite; no booking was submitted.
+- This correction changes only the VM Browser Agent, not TestSite UI or production.
+
 - The user completed Azure CLI MFA. The existing VM subnet now has
   `defaultOutboundAccess=true`; no NAT Gateway or public IP was added.
 - VM outbound checks succeeded for Node.js, GitHub and npm. DeskNet's returned
