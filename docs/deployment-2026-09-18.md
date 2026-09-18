@@ -12,12 +12,40 @@
   TestSite commit above; its target guard passed and deployed to
   `azurechat-gpt5-test`. Post-deployment HTTPS check returned HTTP 200.
 - Run: https://github.com/jnxjent/azurechat-gpt5-test/actions/runs/35297985874
-- TestSite UI code is deployed, but end-to-end DeskNet's use is still blocked by
-  the VM/network/authentication prerequisites below.
+- TestSite UI code and the VM runtime are deployed. End-to-end use still requires
+  manual DeskNet's login in the dedicated VM Edge profile and a TestSite smoke test.
 - TestSite local checks: 17 DeskNet's routing tests and Next.js production build passed.
 - Browser Agent build and application tests passed before push.
 
-## Existing VM: confirmed actual state
+## Latest successful deployment (after MFA and interactive login)
+
+- The user completed Azure CLI MFA. The existing VM subnet now has
+  `defaultOutboundAccess=true`; no NAT Gateway or public IP was added.
+- VM outbound checks succeeded for Node.js, GitHub and npm. DeskNet's returned
+  HTTP 401; the user subsequently confirmed successful login and schedule display
+  in the VM's ordinary Edge profile via Bastion Developer.
+- Deployed Browser Agent commit `cd6cfb497927ce47434fc0fb5e5b219f195b4157` to
+  `C:\BrowserAgent\releases\cd6cfb497927ce47434fc0fb5e5b219f195b4157`.
+  Node.js checksum verification, `npm ci`, TypeScript build and API health passed.
+- Preserved the existing shared environment and API key. The key was transferred
+  encrypted to an ephemeral local RSA key and synchronized to TestSite without
+  printing plaintext credentials.
+- `BrowserAgent-API` is running as the interactive VM user. The
+  `BrowserAgent-DeskNets` launcher exited successfully, and dedicated Edge is
+  reachable through CDP on **127.0.0.1:9222 only**.
+- The API listens on 127.0.0.1:3001 with a private proxy on 10.251.1.4:3001.
+  The Windows firewall rule limits incoming API traffic to 10.251.2.0/26.
+- TestSite VNet integration now targets `snet-appservice-integration`.
+  TestSite-only settings enable the agent and use `http://10.251.1.4:3001`.
+- A probe from TestSite's SCM command environment to the VM health endpoint
+  returned HTTP 200 with `{"status":"ok"}`. This verifies network connectivity,
+  not yet the full authenticated application workflow.
+- Next: user manually logs in through the **dedicated** Edge profile, then verify
+  TestSite scheduling and orange-button reopening without submitting a booking.
+- AzureChat production was not modified. VM remains running for the user's
+  interactive login/test; do not deallocate until that session is finished.
+
+## Earlier attempt: historical state (resolved as noted above)
 
 The existing `vm-abagent-t01` in `rg-azurechat-browser-agent-test` was provisioned,
 but had no Node.js/Git installation, Browser Agent tasks, application listener,
@@ -44,7 +72,7 @@ retains previous release directories, shares browser state, and registers tasks
 for the existing `abaops` user's interactive logon. VM login and DeskNet's
 authentication must be performed by the user; no credentials are automated.
 
-## TestSite connection prerequisite
+## Earlier TestSite connection prerequisite (now resolved)
 
 TestSite Web App: `azurechat-gpt5-test`, resource group `general51`.
 Search index was verified as `dl_index_phase15_test`.
@@ -59,5 +87,6 @@ VM deployment and TestSite-to-VM connection configuration.
 
 ## Cost control
 
-The VM was started only for inspection/deployment and returned to
-`VM deallocated` after the blocked deployment. The final status was verified.
+The VM was returned to `VM deallocated` after the earlier blocked deployment.
+It has since been started and is currently running for interactive authentication
+and testing. Deallocate after the user finishes testing to avoid compute charges.
