@@ -262,6 +262,27 @@ async function route(
       ? findPendingApproval(validatedInput.userId, validatedInput.threadId)
       : undefined;
     const savedConversation = pendingBookings.get(validatedInput.threadId);
+    if (validatedInput.site === "desknets" && savedConversation !== undefined &&
+        isAvailabilityRefreshRequest(validatedInput.prompt) && !hasExplicitSearchPeriod(validatedInput.prompt)) {
+      const context = savedConversation.context;
+      const today = currentJapanDate();
+      const previousDays = inclusiveDateRangeDays(context.date, context.endDate ?? context.date);
+      const end = new Date(`${today}T00:00:00+09:00`);
+      end.setUTCDate(end.getUTCDate() + Math.max(6, previousDays - 1));
+      const endDate = new Intl.DateTimeFormat("en-CA", {timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit"}).format(end);
+      cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId);
+      const refreshed: BrowserRun = {
+        ...createRun({...validatedInput, mode:"read"}),
+        intentSource:"deterministic",
+        task:{type:"find_availability",participants:context.participants ?? [],date:today,endDate,
+          durationMinutes:context.durationMinutes,selectionMode:context.selectionMode ?? "earliest",autoExtendSearch:context.autoExtendSearch ?? false,
+          ...(context.facilityQuery === undefined ? {} : {facilityQuery:context.facilityQuery})},
+      };
+      runs.set(refreshed.id, refreshed);
+      startRun(refreshed.id);
+      sendJson(response, 202, refreshed);
+      return;
+    }
     const roomChangeTask = validatedInput.site === "desknets" ? buildRoomOnlyChangeTask(validatedInput.prompt, savedConversation) : undefined;
     if (roomChangeTask !== undefined && savedConversation !== undefined) {
       cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId);
@@ -595,7 +616,7 @@ async function route(
         task = inheritAvailabilityPreferences(task, conversation?.context, validatedInput.prompt);
         pendingParticipantChoices.delete(validatedInput.threadId);
         if (isEarliestMeetingRequest(validatedInput.prompt)) {
-          task = { ...task, selectionMode: "earliest" };
+          task = { ...task, selectionMode: "earliest", autoExtendSearch: !hasExplicitSearchPeriod(validatedInput.prompt) };
         }
         const today = currentJapanDate();
         if (task.endDate < today) {
@@ -848,12 +869,17 @@ async function route(
     }
 
     if (request.method === "GET" && segments.length === 4 && segments[3] === "handoff") {
-      const approval = run.result?.approvalRequest;
+      const proposal = getReopenableBookingProposal(run);
+      const approval = proposal === undefined ? undefined : {
+        ...proposal, nativeUserIds: ("nativeUserIds" in proposal ? proposal.nativeUserIds : undefined) ?? run.result?.approvalRequest?.nativeUserIds,
+      };
       const age = Date.now() - Date.parse(run.createdAt);
       const superseded = Array.from(runs.values()).some(other => other.id !== run.id &&
         other.input.userId === run.input.userId && other.input.threadId === run.input.threadId &&
         Date.parse(other.createdAt) > Date.parse(run.createdAt));
-      if (superseded || run.status !== "awaiting_approval" || !approval?.nativeUserIds || !Number.isFinite(age) || age < 0 || age > 15*60*1000) {
+      // Reopening is non-consuming. The owner may reopen a future, non-superseded
+      // draft; buildDeskNetsHandoffUrl still rejects meetings that have started.
+      if (superseded || !approval?.nativeUserIds || !Number.isFinite(age) || age < 0) {
         sendJson(response, 409, {message:"この候補は引き渡しできないか期限切れです。候補を再作成してください。"});
         return;
       }
@@ -2068,6 +2094,15 @@ export function isFreshAvailabilityRequest(prompt: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function isAvailabilityRefreshRequest(prompt: string): boolean {
+  const text = prompt.normalize("NFKC");
+  return /(?:再度|もう一度|改めて|再検索|再提案|過ぎ|経過).*(?:候補|日程|空き)|(?:候補|日程|空き).*(?:再度|もう一度|改めて|挙げ|出して|探して|再検索)/.test(text);
+}
+
+export function hasExplicitSearchPeriod(prompt: string): boolean {
+  return /(?:今日|明日|明後日|今週|来週|再来週|今月|来月|\d+\s*(?:月|日|週間|日間)|\d{1,4}[-/]\d{1,2}|月曜|火曜|水曜|木曜|金曜|土曜|日曜)/.test(prompt.normalize("NFKC"));
 }
 
 export function isParticipantChoiceCancellationRequest(prompt: string): boolean {

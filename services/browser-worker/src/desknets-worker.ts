@@ -228,7 +228,8 @@ async function executeAvailabilityRun(
   signal.throwIfAborted();
   const action: BrowserAction = { type: "click", target: "利用設備" };
   assertActionAllowed(action, limits, "read");
-  const dates = enumerateDates(task.date, task.endDate);
+  const searchEnd = task.autoExtendSearch ? new Date(Date.parse(`${task.date}T00:00:00Z`) + 30 * 86_400_000).toISOString().slice(0,10) : task.endDate;
+  const dates = enumerateDates(task.date, searchEnd);
   const holidays = await readCompanyHolidays(page, dates);
   const participantAvailability: BookableAvailabilitySlot[] = [];
   const availability: BookableAvailabilitySlot[] = [];
@@ -241,6 +242,8 @@ async function executeAvailabilityRun(
 
   for (let index = 0; index < dates.length; index += 1) {
     const date = dates[index] as string;
+    if (task.autoExtendSearch && holidays.has(date)) continue;
+    if (task.autoExtendSearch) task.endDate = date;
     let participantSchedules: ParticipantSchedule[];
     if (index > 0) {
       await discardPreparedForm(page);
@@ -326,7 +329,7 @@ async function executeAvailabilityRun(
       ),
     );
     facilityRowCount = facilitySchedules.length;
-    if (index === dates.length - 1) {
+    if (index === dates.length - 1 || task.autoExtendSearch) {
       observationAfter = await observe(
         page,
         run.id,
@@ -365,6 +368,7 @@ async function executeAvailabilityRun(
     }))));
     assertWithinDuration(startedAt, limits.maxRunDurationMs);
     signal.throwIfAborted();
+    if (task.autoExtendSearch && availability.length >= 5) break;
   }
   if (observationBefore === undefined || observationAfter === undefined) {
     throw new Error("The requested date range produced no observable schedule data.");
@@ -373,6 +377,7 @@ async function executeAvailabilityRun(
   signal.throwIfAborted();
 
   const pendingBooking = {
+    ...(task.autoExtendSearch === undefined ? {} : {autoExtendSearch:task.autoExtendSearch}),
     ...(task.selectionMode === undefined ? {} : { selectionMode: task.selectionMode }),
     date: task.date,
     endDate: task.endDate,
@@ -524,6 +529,7 @@ async function executeBookingRun(
           : "DeskNet'sの予定追加画面を準備しました。専用EdgeをAlt + Tabで表示し、内容を確認して「追加」を手動で押してください。Agentは予定を登録していません。",
         evidence: [observationBefore.screenshotRef],
         manualActionRequest: {
+          ...(run.result?.approvalRequest?.nativeUserIds ? {nativeUserIds:run.result.approvalRequest.nativeUserIds} : {}),
           title: task.title,
           start: slot.start,
           end: slot.end,
@@ -558,7 +564,7 @@ async function executeBookingRun(
     return {...run,status:"awaiting_user_input",updatedAt:new Date().toISOString(),result:{
       summary:"Displayed the changed room for manual final confirmation.",
       assistantMessage:"日時・参加者・会議時間を引き継ぎ、会議室を変更したDeskNet's画面を表示しました。最終登録はDeskNet'sの「追加」を手動で押してください。",
-      evidence:[observation.screenshotRef],manualActionRequest:{title:task.title,start:slot.start,end:slot.end,
+      evidence:[observation.screenshotRef],manualActionRequest:{...(verifiedNativeUserIds ? {nativeUserIds:verifiedNativeUserIds} : {}),title:task.title,start:slot.start,end:slot.end,
         participantIds:pending.participantIds,facilityId,emailNotificationWillBeSent:task.sendEmail,selfNotificationSuppressed:false},
     }};
   }

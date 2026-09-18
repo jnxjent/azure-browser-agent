@@ -63,6 +63,8 @@ export interface FindAvailabilityTask {
   title?: string;
   /** Offer up to five chronological choices, marking the first as earliest. */
   selectionMode?: "earliest";
+  /** Search ahead for several choices only when the user did not specify a period. */
+  autoExtendSearch?: boolean;
 }
 
 export interface BookMeetingTask {
@@ -142,6 +144,7 @@ export interface PendingParticipantChoice {
 
 export interface PendingBookingContext {
   selectionMode?: "earliest";
+  autoExtendSearch?: boolean;
   originalAvailability?: BookableAvailabilitySlot[];
   originalAllFacilityAvailability?: BookableAvailabilitySlot[];
   date: string;
@@ -182,6 +185,7 @@ export interface BookingApprovalRequest {
 }
 
 export interface ManualBookingActionRequest {
+  nativeUserIds?: string[];
   title: string;
   start: string;
   end: string;

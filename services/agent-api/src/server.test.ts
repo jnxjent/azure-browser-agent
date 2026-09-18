@@ -4,6 +4,8 @@ import type { BookableAvailabilitySlot } from "@azure-browser-agent/agent-core";
 import { createRun } from "@azure-browser-agent/agent-core";
 import {
   buildShowCandidatesResponse,
+  isAvailabilityRefreshRequest,
+  hasExplicitSearchPeriod,
   getReopenableBookingProposal,
   buildEarliestCandidatesRun,
   isEarliestMeetingRequest,
@@ -33,6 +35,15 @@ import {
 } from "./server.js";
 
 const START = "2026-08-24T00:30:00.000Z";
+
+it("recognizes re-search after a passed meeting without mistaking room changes for a refresh", () => {
+  for (const prompt of ["最短の会議開始時間が過ぎたので、再度候補を挙げて", "もう一度候補を出して", "候補を再検索して"]) {
+    assert.equal(isAvailabilityRefreshRequest(prompt), true);
+  }
+  assert.equal(isAvailabilityRefreshRequest("アクトの別の会議室に変更して"), false);
+  assert.equal(hasExplicitSearchPeriod("髙田部長、鈴木清彦部長、私で最短で打ち合わせ可能な日程を挙げて"), false);
+  for (const prompt of ["今週の最短", "9/24の候補", "来月の最短", "２週間以内で最短"]) assert.equal(hasExplicitSearchPeriod(prompt), true);
+});
 
 it("permits reopening a manual confirmation or retrying a failed handoff, but not active or finished runs", () => {
   const run = createRun({ userId: "test", threadId: "reopen", site: "desknets", mode: "write", prompt: "再表示" });
