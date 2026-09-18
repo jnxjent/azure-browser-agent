@@ -8,6 +8,12 @@
 - AzureChat TestSite: `jnxjent/azurechat-gpt5-test`, branch `testsite/fix-toggle-selfscope-20260323`.
 - TestSite commit: `8c0419d5022c9bc34b9838aeadb5cd16848be516` (six DeskNet's files).
 - TestSite Workflow: `azure-dev-validate.yml`, run `35297985874`.
+- Result: **build and deploy succeeded**. The workflow ran against the exact
+  TestSite commit above; its target guard passed and deployed to
+  `azurechat-gpt5-test`. Post-deployment HTTPS check returned HTTP 200.
+- Run: https://github.com/jnxjent/azurechat-gpt5-test/actions/runs/35297985874
+- TestSite UI code is deployed, but end-to-end DeskNet's use is still blocked by
+  the VM/network/authentication prerequisites below.
 - TestSite local checks: 17 DeskNet's routing tests and Next.js production build passed.
 - Browser Agent build and application tests passed before push.
 
