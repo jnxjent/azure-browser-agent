@@ -32,7 +32,10 @@ async function fixture() {
     if (req.headers.cookie?.includes("session=ok")) {
       res.end('<div>氏名/組織名</div><button>追加</button>'); return;
     }
-    res.end(`<form method="post"><input type="text" name="user"><input type="password" name="password">${mode === "mfa" ? '<input autocomplete="one-time-code">' : ''}<button>ログイン</button></form>`);
+    const control = mode === "native"
+      ? '<a id="login-btn" class="jlogin-submit" href="#" onclick="event.preventDefault();this.closest(\'form\').requestSubmit()">ログイン</a><input type="submit" value="ログイン" style="position:absolute;left:-10000px">'
+      : '<button>ログイン</button>';
+    res.end(`<form method="post"><input type="text" name="user"><input type="password" name="password">${mode === "mfa" ? '<input autocomplete="one-time-code">' : ''}${control}</form>`);
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${(server.address() as {port:number}).port}`;
@@ -49,6 +52,7 @@ test("BASIC and app login recover; a later cookie expiry can recover again", asy
     const context = await browser.newContext();
     const page = await context.newPage();
     for (let i=0;i<2;i++) {
+      if (i===1) f.mode("native");
       const auth = new DeskNetsAuthentication(page,f.lease,f.origin,new AbortController().signal);
       try {
         await auth.attach();

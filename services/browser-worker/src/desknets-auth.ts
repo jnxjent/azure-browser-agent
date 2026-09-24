@@ -68,7 +68,10 @@ export class DeskNetsAuthentication {
     // Only a simple, unambiguous login form. MFA/password changes/select-user forms remain manual.
     const password = this.page.locator('input[type="password"]:visible');
     const username = this.page.locator('input[type="text"]:visible, input[type="email"]:visible, input:not([type]):visible');
-    const login = this.page.getByRole("button", { name: /^ログイン$|^Login$|^Log in$/i });
+    // Native DeskNet's puts an auxiliary submit input far offscreen. The visible
+    // anchor invokes its own AJAX form handler; do not force-click the auxiliary input.
+    const nativeLogin = this.page.locator("#login-btn.jlogin-submit:visible");
+    const login = await nativeLogin.count() === 1 ? nativeLogin : this.page.getByRole("button", { name: /^ログイン$|^Login$|^Log in$/i });
     if (await password.count() !== 1 || await username.count() !== 1 || await login.count() !== 1 || await this.page.locator('input[autocomplete="one-time-code"]:visible').count() > 0) throw new DeskNetsAuthenticationError();
     const safeForm = await password.evaluate(input => {
       const form = (input as HTMLInputElement).form;
@@ -80,6 +83,7 @@ export class DeskNetsAuthentication {
       return (!target || new URL(target, location.href).origin === location.origin) && (!method || method.toLowerCase() === "post");
     });
     if (!safeForm || !safeButton) throw new DeskNetsAuthenticationError();
+    const schedule = new URL(this.page.url());
     this.appAttempted = true;
     await this.lease!.block("app");
     try {
@@ -90,8 +94,7 @@ export class DeskNetsAuthentication {
       await login.click({ timeout: 10_000 });
       await password.waitFor({ state: "hidden", timeout: 10_000 });
       this.signal.throwIfAborted();
-      const schedule = new URL(this.page.url());
-      if (schedule.origin !== this.origin) throw new DeskNetsAuthenticationError();
+      if (new URL(this.page.url()).origin !== this.origin) throw new DeskNetsAuthenticationError();
       schedule.search = "?cmd=schindex";
       schedule.hash = "cmd=schweekgrp";
       await this.page.goto(schedule.href, { waitUntil: "domcontentloaded", timeout: 15_000 });
@@ -102,8 +105,10 @@ export class DeskNetsAuthentication {
       // Do not expose Playwright call logs (which can contain filled values).
       throw new DeskNetsAuthenticationError();
     } finally {
-      await password.fill("", { timeout: 1000 }).catch(() => {});
-      await username.fill("", { timeout: 1000 }).catch(() => {});
+      if (await isLoginPage(this.page).catch(() => false)) {
+        await password.fill("", { timeout: 1000 }).catch(() => {});
+        await username.fill("", { timeout: 1000 }).catch(() => {});
+      }
     }
   }
 

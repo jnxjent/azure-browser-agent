@@ -1,5 +1,6 @@
 # Read-only authentication test using an isolated context, never the user's schedule tab.
 $ErrorActionPreference='Stop'
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 if($env:COMPUTERNAME -ne 'vm-abagent-t01'){throw 'Unexpected VM'}
 $release='C:\BrowserAgent\releases\'+(Get-Content 'C:\BrowserAgent\shared\active-commit.txt').Trim()
 $env:DESKNETS_CREDENTIAL_FILE='C:\BrowserAgent\shared\credentials\desknets.bin'
@@ -22,9 +23,17 @@ const {pathToFileURL}=require('node:url');
     await auth.attach();
     await page.goto(lease.credentials.origin+'/dneo/dneo.cgi?cmd=schindex#cmd=schweekgrp',{waitUntil:'domcontentloaded',timeout:30000});
     const recovered=await auth.recoverLogin();
-    await page.getByText('氏名/組織名',{exact:true}).first().waitFor({state:'visible',timeout:15000});
+    await page.getByText('\u6c0f\u540d/\u7d44\u7e54\u540d',{exact:true}).first().waitFor({state:'visible',timeout:15000});
     auth.assertHealthy();
     console.log(JSON.stringify({attempt:attempt+1,appRecovered:recovered,scheduleVisible:true,basicBlocked:await lease.blocked('basic'),appBlocked:await lease.blocked('app')}));
+   }catch {
+    console.log(JSON.stringify({attempt:attempt+1,basicBlocked:await lease.blocked('basic'),appBlocked:await lease.blocked('app'),loginShape:await page.evaluate(()=>({
+     path:location.pathname,
+     inputs:[...document.querySelectorAll('input')].filter(e=>e.getBoundingClientRect().width>0).map(e=>({type:e.type,name:e.name,id:e.id})),
+     forms:[...document.forms].map(f=>({method:f.method,path:new URL(f.action||location.href).pathname})),
+     loginControls:[...document.querySelectorAll('button,a,input[type=submit]')].filter(e=>/\u30ed\u30b0\u30a4\u30f3|login/i.test(e.textContent||e.getAttribute('value')||'')).map(e=>({tag:e.tagName,id:e.id,role:e.getAttribute('role')}))
+    })).catch(()=>null)}));
+    throw new Error('Authentication verification failed');
    }finally{await auth.dispose();}
    await context.clearCookies();
   }
