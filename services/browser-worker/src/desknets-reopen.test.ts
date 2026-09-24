@@ -36,8 +36,15 @@ const fixture = `<!doctype html><meta charset="utf-8">
 test("orange-button handoff recreates a closed tab and restores all booking fields", async () => {
   const browser = await chromium.launch({headless:true});
   const context = await browser.newContext();
-  await context.route("https://desk.example/**", route => route.fulfill({contentType:"text/html; charset=utf-8", body:fixture}));
-  const worker = new DeskNetsBrowserWorker({limits:{allowedDomains:["desk.example"],maxSteps:20,maxRunDurationMs:60_000}});
+  let loginSubmissions = 0;
+  await context.route("https://desk.example/**", route => {
+    if(route.request().method()==="POST")loginSubmissions++;
+    return route.fulfill({contentType:"text/html; charset=utf-8", body:fixture});
+  });
+  const blocked = new Set<string>();
+  const worker = new DeskNetsBrowserWorker({limits:{allowedDomains:["desk.example"],maxSteps:20,maxRunDurationMs:60_000},
+    loadCredentials:async()=>({credentials:{origin:"https://desk.example",app:{username:"test",password:"fake-secret"}},
+      blocked:async k=>blocked.has(k),block:async k=>{blocked.add(k);},clear:async k=>{blocked.delete(k);}})});
   // Use an isolated browser instead of the user's authenticated Edge.
   (worker as unknown as {browserConnection:Promise<Browser>}).browserConnection = Promise.resolve(browser);
   try {
@@ -66,5 +73,12 @@ test("orange-button handoff recreates a closed tab and restores all booking fiel
       assert.equal(await restored.locator('#suppress').isChecked(),false);
       assert.equal(await restored.evaluate(()=> (window as unknown as {registrations:number}).registrations),0);
     }
+    // Expiry between requests: two simultaneous handoffs share one reauthentication.
+    await context.pages()[0]!.setContent('<form method="post"><input name="user"><input type="password" name="password"><button>ログイン</button></form>');
+    const recovered = await Promise.all([worker.execute(prepared,new AbortController().signal),worker.execute(prepared,new AbortController().signal)]);
+    assert.equal(loginSubmissions,1);
+    assert.equal(blocked.size,0);
+    assert.ok(recovered.every(result=>result.status==="awaiting_user_input"));
+    assert.equal(await context.pages()[0]!.evaluate(()=> (window as unknown as {registrations:number}).registrations),0);
   } finally { await browser.close(); }
 });

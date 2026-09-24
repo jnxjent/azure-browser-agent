@@ -35,10 +35,15 @@ import { ensureSingleDeskNetsTab } from "./desknets-tabs.js";
 import { openFacilityDialog } from "./desknets-facility-dialog.js";
 import { assertFacilityAvailable } from "./desknets-facility-conflicts.js";
 import { participantResultsTable, participantResultsBaseline } from "./desknets-participant-results.js";
+import { loadDeskNetsCredentials } from "./desknets-credentials.js";
+import { DeskNetsAuthentication, DeskNetsAuthenticationError, isHttpAuthError, isLoginPage } from "./desknets-auth.js";
+
+class RetryAfterAuthentication extends Error {}
 
 interface DeskNetsWorkerOptions {
   cdpEndpoint?: string;
   limits?: RunLimits;
+  loadCredentials?: typeof loadDeskNetsCredentials;
 }
 
 const DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222";
@@ -48,6 +53,8 @@ export class DeskNetsBrowserWorker implements RunExecutor {
   private readonly limits: RunLimits;
   private browserConnection: Promise<Browser> | undefined;
   private scheduleUrl: string | undefined;
+  private operationTail: Promise<unknown> = Promise.resolve();
+  private readonly loadCredentials: typeof loadDeskNetsCredentials;
 
   constructor(options: DeskNetsWorkerOptions = {}) {
     this.cdpEndpoint =
@@ -55,9 +62,26 @@ export class DeskNetsBrowserWorker implements RunExecutor {
       process.env.DESKNETS_CDP_ENDPOINT ??
       DEFAULT_CDP_ENDPOINT;
     this.limits = options.limits ?? readLimitsFromEnvironment();
+    this.loadCredentials = options.loadCredentials ?? loadDeskNetsCredentials;
   }
 
   async execute(run: BrowserRun, signal: AbortSignal): Promise<BrowserRun> {
+    // The dedicated browser/profile is shared; serialize operations and reauthentication.
+    const operation = this.operationTail.catch(() => {}).then(async () => {
+      signal.throwIfAborted();
+      try { return await this.executeOnce(run, signal); }
+      catch (error) {
+        if (!(error instanceof RetryAfterAuthentication)) throw error;
+        signal.throwIfAborted();
+        try { return await this.executeOnce(run, signal); }
+        catch (retryError) { if (retryError instanceof RetryAfterAuthentication) throw new DeskNetsAuthenticationError(); throw retryError; }
+      }
+    });
+    this.operationTail = operation;
+    return operation;
+  }
+
+  private async executeOnce(run: BrowserRun, signal: AbortSignal): Promise<BrowserRun> {
     assertRunAllowed(run, this.limits);
     if (run.input.site !== "desknets") {
       throw new Error("DeskNetsBrowserWorker only accepts site=desknets.");
@@ -76,6 +100,7 @@ export class DeskNetsBrowserWorker implements RunExecutor {
     let page: Page | undefined;
     let preservePreparedForm = false;
     let primaryError: unknown;
+    let authentication: DeskNetsAuthentication | undefined;
     try {
       if (run.task === undefined) {
         throw new Error("DeskNet's run does not contain a structured task.");
@@ -88,10 +113,17 @@ export class DeskNetsBrowserWorker implements RunExecutor {
         const browserContext = browser.contexts()[0];
         if (!browserContext) throw new Error("DeskNet's専用ブラウザのセッションがありません。");
         page = await browserContext.newPage();
+        authentication = new DeskNetsAuthentication(page, await this.loadCredentials(), new URL(startUrl).origin, signal);
+        await authentication.attach();
         await page.goto(startUrl, { waitUntil: "domcontentloaded" });
       }
       const pageUrl = new URL(page.url());
       assertActionAllowed({ type: "open_page", url: pageUrl.href }, this.limits);
+      if (!authentication) {
+        authentication = new DeskNetsAuthentication(page, await this.loadCredentials(), pageUrl.origin, signal);
+        await authentication.attach();
+      }
+      await authentication.recoverLogin();
       const scheduleUrl = new URL(pageUrl);
       scheduleUrl.search = "?cmd=schindex";
       scheduleUrl.hash = "cmd=schweekgrp";
@@ -130,10 +162,19 @@ export class DeskNetsBrowserWorker implements RunExecutor {
       throw new Error("DeskNet's run does not contain a supported structured task.");
     } catch (error) {
       primaryError = error;
+      if (signal.aborted) throw signal.reason;
+      if (isHttpAuthError(error)) throw new DeskNetsAuthenticationError("DeskNet's入口のBASIC認証が必要です。VMで認証するか、保存した認証情報を更新してください。");
+      authentication?.assertHealthy();
+      if (!(error instanceof DeskNetsAuthenticationError) && page && authentication && await isLoginPage(page).catch(() => false)) {
+        await authentication.recoverLogin();
+        throw new RetryAfterAuthentication();
+      }
+      if (error instanceof DeskNetsAuthenticationError) throw error;
       await recordFailure(artifactDirectory, page, "primary", error);
       throw error;
     } finally {
-      if (page !== undefined && !page.isClosed() && !preservePreparedForm) {
+      await authentication?.dispose();
+      if (page !== undefined && !page.isClosed() && !preservePreparedForm && !await isLoginPage(page).catch(() => true)) {
         try {
           await discardPreparedForm(page);
         } catch (cleanupError) {

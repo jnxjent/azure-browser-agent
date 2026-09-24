@@ -43,6 +43,11 @@ try {
 } finally { Pop-Location }
 # Existing configuration is deliberately never replaced here.
 if (!(Test-Path "$shared\.env.local")) { throw 'Provision shared .env.local before activating the release.' }
+# Enrollment is optional: existing manual sessions keep working until credentials are registered.
+if (!(Select-String -LiteralPath "$shared\.env.local" -Pattern '^DESKNETS_CREDENTIAL_FILE=' -Quiet)) {
+  Add-Content -LiteralPath "$shared\.env.local" -Value "`r`nDESKNETS_CREDENTIAL_FILE=C:/BrowserAgent/shared/credentials/desknets.bin" -Encoding UTF8
+}
+Copy-Item -LiteralPath "$release\scripts\set-desknets-credentials.ps1" -Destination "$shared\set-desknets-credentials.ps1" -Force
 $apiArguments = "--enable-source-maps --env-file=$shared\.env.local $release\services\agent-api\dist\server.js"
 $apiAction = New-ScheduledTaskAction -Execute "$nodeDirectory\node.exe" -Argument $apiArguments -WorkingDirectory $release
 $principal = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\abaops" -LogonType Interactive -RunLevel Limited
