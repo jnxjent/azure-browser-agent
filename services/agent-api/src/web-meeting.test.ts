@@ -366,6 +366,8 @@ describe("describeWebMeeting", () => {
     assert.equal(view.registered, false);
     assert.ok(view.copyText?.includes("参加URL: "));
     assert.ok(view.copyText?.includes("会議ID: 123456789"));
+    assert.ok(view.copyText?.endsWith("パスコード: abc123"));
+    assert.ok(!view.copyText?.includes("【Teams WEB会議情報ここまで】"));
     assert.ok(view.notes.some((note) => note.includes("末尾")));
     assert.ok(view.notes.some((note) => note.includes("古いWEB会議情報")));
     assert.ok(view.notes.some((note) => note.includes("Teams側に残ります")));
