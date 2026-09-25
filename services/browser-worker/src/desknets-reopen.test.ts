@@ -79,6 +79,12 @@ test("orange-button handoff recreates a closed tab and restores all booking fiel
     assert.equal(loginSubmissions,1);
     assert.equal(blocked.size,0);
     assert.ok(recovered.every(result=>result.status==="awaiting_user_input"));
+    // A missing title must also clear any text left by a previous preparation.
+    assert.equal(prepared.task?.type,"book_meeting");
+    if (prepared.task?.type !== "book_meeting") throw new Error("Unexpected task");
+    const blank = await worker.execute({...prepared,task:{...prepared.task,title:""}},new AbortController().signal);
+    assert.equal(blank.status,"awaiting_user_input");
+    assert.equal(await context.pages()[0]!.locator('input[name="detail"]').inputValue(),"");
     assert.equal(await context.pages()[0]!.evaluate(()=> (window as unknown as {registrations:number}).registrations),0);
   } finally { await browser.close(); }
 });

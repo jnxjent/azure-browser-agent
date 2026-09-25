@@ -7,6 +7,9 @@ import {
   isAvailabilityRefreshRequest,
   hasExplicitSearchPeriod,
   getReopenableBookingProposal,
+  isRunSuperseded,
+  isWebMeetingFacilityQuery,
+  readNumberedCandidateSelection,
   buildEarliestCandidatesRun,
   isEarliestMeetingRequest,
   inheritAvailabilityPreferences,
@@ -19,6 +22,7 @@ import {
   isFreshAvailabilityRequest,
   isAuthorizedRequest,
   isRunOwnerRequest,
+  isWebMeetingEnabled,
   isParticipantChoiceCancellationRequest,
   isShowCandidatesRequest,
   matchOfferedOrganizations,
@@ -35,6 +39,17 @@ import {
 } from "./server.js";
 
 const START = "2026-08-24T00:30:00.000Z";
+
+it("selects a numbered candidate with a WEB request without treating WEB as a room", () => {
+  assert.equal(readNumberedCandidateSelection("では上記１で。WEB会議も設定して"), 1);
+  assert.equal(readNumberedCandidateSelection("では、1で"), 1);
+  assert.equal(readNumberedCandidateSelection("では候補2で、Teams会議も作成して"), 2);
+  assert.equal(readNumberedCandidateSelection("では1で。会議室はアクトで"), undefined);
+  assert.equal(readNumberedCandidateSelection("では1で。WEB会議は不要"), undefined);
+  assert.equal(isWebMeetingFacilityQuery("WEB会議"), true);
+  assert.equal(isWebMeetingFacilityQuery("Teams会議"), true);
+  assert.equal(isWebMeetingFacilityQuery("有玉大会議室"), false);
+});
 
 it("recognizes re-search after a passed meeting without mistaking room changes for a refresh", () => {
   for (const prompt of ["最短の会議開始時間が過ぎたので、再度候補を挙げて", "もう一度候補を出して", "候補を再検索して"]) {
@@ -65,6 +80,21 @@ it("permits reopening a manual confirmation or retrying a failed handoff, but no
   run.status = "awaiting_user_input";
   run.result = { summary: "needs participant input", evidence: [] };
   assert.equal(getReopenableBookingProposal(run), undefined);
+});
+
+it("rejects an older card after a later run in the same user and thread", () => {
+  const make = (userId: string, threadId: string) => createRun({
+    userId, threadId, site: "desknets", mode: "read", prompt: "test",
+  });
+  const old = make("user-1", "thread-1");
+  const otherUser = make("user-2", "thread-1");
+  const otherThread = make("user-1", "thread-2");
+  const latest = make("user-1", "thread-1");
+  const runs = [old, otherUser, otherThread, latest];
+  assert.equal(isRunSuperseded(old, runs), true);
+  assert.equal(isRunSuperseded(latest, runs), false);
+  assert.equal(isRunSuperseded(otherUser, runs), false);
+  assert.equal(isRunSuperseded(otherThread, runs), false);
 });
 
 it("room-only replies inherit selected time, people, title and email without a new interpretation", () => {
@@ -304,6 +334,20 @@ describe("readRequestedDurationChange", () => {
       readRequestedDurationChange(undefined, "では9/16 15:30開始で。会議時間は30分でいい。"),
       30,
     );
+  });
+});
+
+describe("isWebMeetingEnabled", () => {
+  it("stays off unless the flag is explicitly set to true", () => {
+    // Off by default: no web meeting is requested, created or displayed until the
+    // delegated scopes have been consented to and the flag is turned on.
+    assert.equal(isWebMeetingEnabled(undefined), false);
+    assert.equal(isWebMeetingEnabled(""), false);
+    assert.equal(isWebMeetingEnabled("false"), false);
+    assert.equal(isWebMeetingEnabled("1"), false);
+    assert.equal(isWebMeetingEnabled("TRUE"), false);
+    assert.equal(isWebMeetingEnabled("true"), true);
+    assert.equal(isWebMeetingEnabled(" true "), true);
   });
 });
 

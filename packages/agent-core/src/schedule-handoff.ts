@@ -1,4 +1,5 @@
 import type { BookingApprovalRequest } from "./contracts.js";
+import { upsertWebMeetingBlock } from "./web-meeting.js";
 
 export type CalendarTarget = { provider: "desknets" | "microsoft365"; connectionId: string };
 export type ScheduleIdentity = {
@@ -31,24 +32,20 @@ export interface TeamsMeetingInformation {
   passcode?: string;
 }
 
-/** Pure formatting only: this never creates a Teams meeting or sends invitations. */
+/**
+ * Pure formatting only: this never creates a Teams meeting or sends invitations.
+ * Superseded by `upsertWebMeetingBlock`, which also replaces a changed block instead of
+ * only suppressing an identical one at the end. Kept as the narrow entry point used where
+ * only a join URL and optional ID/passcode are known.
+ */
 export function appendTeamsInformation(description: string, meeting: TeamsMeetingInformation): string {
-  const url = new URL(meeting.joinUrl);
-  if (url.protocol !== "https:" || url.username || url.password ||
-      !["teams.microsoft.com", "teams.cloud.microsoft"].includes(url.hostname)) {
-    throw new Error("Unsupported Teams join URL.");
-  }
-  for (const value of [meeting.meetingId, meeting.passcode]) {
-    if (value !== undefined && (!value.trim() || /[\r\n]/.test(value))) {
-      throw new Error("Invalid meeting information.");
-    }
-  }
-  const block = ["Teams WEB会議", `参加URL: ${url.href}`,
-    ...(meeting.meetingId ? [`会議ID: ${meeting.meetingId}`] : []),
-    ...(meeting.passcode ? [`パスコード: ${meeting.passcode}`] : []),
-  ].join("\n");
-  if (description === block || description.endsWith(`\n\n${block}`)) return description;
-  return description ? `${description}\n\n${block}` : block;
+  return upsertWebMeetingBlock(description, {
+    joinUrl: meeting.joinUrl,
+    ...(meeting.meetingId === undefined ? {} : {meetingId: meeting.meetingId}),
+    ...(meeting.passcode === undefined
+      ? {passcodeAvailability: "unavailable" as const}
+      : {passcode: meeting.passcode, passcodeAvailability: "required" as const}),
+  });
 }
 
 export function draftFromDeskNetsApproval(

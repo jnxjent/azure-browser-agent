@@ -20,14 +20,14 @@ import {
   type RunExecutor,
   type RunLimits,
 } from "@azure-browser-agent/agent-core";
-import { chromium, type Browser, type Locator, type Page } from "playwright";
+import { chromium, errors, type Browser, type Locator, type Page } from "playwright";
 import {
   extractFacilitySchedules,
   extractParticipantSchedules,
   mergeParticipantScheduleObservations,
 } from "./desknets-dom.js";
 import { keepMeetingRoomFacilities } from "./desknets-facilities.js";
-import { resolveSelfOrganizationParticipants, preferParticipantOrganization } from "./desknets-participants.js";
+import { resolveSelfOrganizationParticipants, preferParticipantOrganization, participantNameSearchVariants } from "./desknets-participants.js";
 import { readCompanyHolidays } from "./desknets-holidays.js";
 import { readMeetingHours } from "./meeting-hours.js";
 import { resolveLiveRoomChange } from "./room-change.js";
@@ -920,7 +920,7 @@ class AmbiguousParticipantError extends Error {
   }
 }
 
-async function selectParticipant(
+export async function selectParticipant(
   dialog: Locator,
   page: Page,
   selector: ParticipantSelector,
@@ -929,44 +929,51 @@ async function selectParticipant(
   await searchTab.click({ noWaitAfter: true });
   const nameField = dialog.locator('input[name="name"]:visible').first();
   await nameField.waitFor({ state: "visible", timeout: 5_000 });
-  await nameField.fill(selector.name);
   const keyField = dialog.locator('input[name="key"]:visible').first();
   if ((await keyField.count()) === 1) await keyField.fill("");
 
   const resultsTable = participantResultsTable(dialog);
-  const previousResultsHtml = await participantResultsBaseline(resultsTable);
-  // Clicking the search form's submit input does not reliably submit the name
-  // search (it can land on an unrelated default listing); pressing Enter in the
-  // name field submits the correct form.
-  await nameField.press("Enter");
-  await resultsTable.waitFor({ state: "visible", timeout: 10_000 });
-  await waitForResultsToRefresh(resultsTable, previousResultsHtml);
-  await page.waitForTimeout(300);
-
   const rows = resultsTable.locator("tbody tr");
-  // Read all results in one browser round trip, retaining row indices and
-  // exact matching semantics for the subsequent ambiguity checks.
-  const candidates = await rows.evaluateAll((elements) => elements.map((row, index) => {
-    const names = row.querySelectorAll<HTMLElement>("span.co-sel-name");
-    const organizations = row.querySelectorAll<HTMLElement>("span.co-busyo-def");
-    return {
-      index,
-      name: names.length === 1 ? names[0]!.innerText.trim() : null,
-      organization: organizations.length === 1 ? organizations[0]!.innerText.trim() : "",
-    };
-  }));
-  const nameMatches = candidates
-    .filter((candidate) => candidate.name?.startsWith(selector.name))
-    .map((candidate) => ({ row: rows.nth(candidate.index), organization: candidate.organization }));
+  let sawNameMatch = false;
+  let matches: Array<{ row: Locator; organization: string }> = [];
+  for (const searchName of participantNameSearchVariants(selector.name)) {
+    const previousResultsHtml = await participantResultsBaseline(resultsTable);
+    await nameField.fill(searchName);
+    // The submit input can show an unrelated listing; Enter submits the name form.
+    await nameField.press("Enter");
+    // DeskNet's hides the entire result table when a name has zero matches.
+    // That is expected for the first spelling; continue with the alternate.
+    try {
+      await resultsTable.waitFor({ state: "visible", timeout: 10_000 });
+    } catch (error) {
+      if (error instanceof errors.TimeoutError && (await resultsTable.count()) === 0) continue;
+      throw error;
+    }
+    await waitForResultsToRefresh(resultsTable, previousResultsHtml);
+    await page.waitForTimeout(300);
 
-  if (nameMatches.length === 0) {
-    throw new Error(`Participant was not found: ${selector.name}`);
+    // Retain row indices and strict name matching before any organization filter.
+    const candidates = await rows.evaluateAll((elements) => elements.map((row, index) => {
+      const names = row.querySelectorAll<HTMLElement>("span.co-sel-name");
+      const organizations = row.querySelectorAll<HTMLElement>("span.co-busyo-def");
+      return {
+        index,
+        name: names.length === 1 ? names[0]!.innerText.trim() : null,
+        organization: organizations.length === 1 ? organizations[0]!.innerText.trim() : "",
+      };
+    }));
+    const nameMatches = candidates
+      .filter((candidate) => candidate.name?.startsWith(searchName))
+      .map((candidate) => ({ row: rows.nth(candidate.index), organization: candidate.organization }));
+    if (nameMatches.length === 0) continue;
+    sawNameMatch = true;
+    matches = preferParticipantOrganization(nameMatches, selector);
+    if (matches.length > 0) break;
   }
-  const matches = preferParticipantOrganization(nameMatches, selector);
+
   if (matches.length === 0) {
-    throw new Error(
-      `Participant ${selector.name} was found, but none belong to the requested organization: ${selector.organization}`,
-    );
+    if (!sawNameMatch) throw new Error(`Participant was not found: ${selector.name}`);
+    throw new Error(`Participant ${selector.name} was found, but none belong to the requested organization: ${selector.organization}`);
   }
   if (matches.length > 1) {
     // Exclude rows DeskNet's didn't expose an organization for — offering ""

@@ -12,6 +12,7 @@ import {
   parseDeskNetsTask,
   readDurationMinutes,
   validateCreateRunInput,
+  detectWebMeetingRequest,
   ORGANIZATION_SUFFIX,
   type BookableAvailabilitySlot,
   type BrowserRun,
@@ -42,6 +43,17 @@ import {
   parseFacilityPreferenceRegistration,
 } from "./facility-preference-store.js";
 import { readStructuredCommandOrUndefined } from "./structured-command.js";
+import { WebMeetingStore } from "./web-meeting-store.js";
+import {
+  GraphRequestError,
+  GraphWebMeetingClient,
+  createGraphCall,
+} from "./graph-web-meeting.js";
+import {
+  WebMeetingNotRequestedError,
+  describeWebMeeting,
+  ensureWebMeeting,
+} from "./web-meeting-service.js";
 import { loadSharedIntentConfiguration } from "./intent-configuration.js";
 
 loadSharedIntentConfiguration();
@@ -87,6 +99,15 @@ const facilityPreferenceStore = new FacilityPreferenceStore(
       ".data/desknets-facility-preferences.json",
   ),
 );
+// Deliberately NOT in the in-memory conversation state: a restart between
+// creating the Teams meeting and reading its join information must resume,
+// not create a second meeting.
+const webMeetingStore = new WebMeetingStore(
+  resolve(
+    process.cwd(),
+    process.env.DESKNETS_WEB_MEETINGS_PATH ?? ".data/desknets-web-meetings.json",
+  ),
+);
 
 // Clears the one-shot "awaiting a specific reply" markers after they've been
 // consumed, while keeping the reusable data (context.availability,
@@ -116,6 +137,32 @@ export function isShowCandidatesRequest(prompt: string): boolean {
   } catch {
     return false;
   }
+}
+
+const WEB_REQUEST_ONLY = /^(?:web|ウェブ|オンライン|teams|チームズ|リモート)(?:会議|ミーティング)?(?:も|を|で)?(?:設定|作成|追加|付け|つけ|希望|お願い)?(?:して|してください|したい|します|でお願いします|にして)?[。.!！\s]*$/i;
+
+/** A numbered choice may carry a WEB preference, which is not a room choice. */
+export function readNumberedCandidateSelection(prompt: string): number | undefined {
+  const normalized = prompt.normalize("NFKC").trim();
+  const match = normalized.match(
+    /^(?:では|それでは|じゃあ)?[、,\s]*(?:上記|候補(?:の)?)?[、,\s]*(\d+)(?:番|番目)?(?:で|を選んで|にして)(?:お願いします)?[、,。.!！\s]*(.*)$/,
+  );
+  if (match?.[1] === undefined) return undefined;
+  const remainder = (match[2] ?? "").trim();
+  if (remainder !== "" &&
+      (detectWebMeetingRequest(remainder) !== "requested" || !WEB_REQUEST_ONLY.test(remainder))) {
+    return undefined;
+  }
+  const candidateNumber = Number(match[1]);
+  return Number.isSafeInteger(candidateNumber) && candidateNumber > 0 ? candidateNumber : undefined;
+}
+
+/** Model hints such as "WEB会議" describe the meeting medium, not a DeskNet's room. */
+export function isWebMeetingFacilityQuery(value: string | null | undefined): boolean {
+  const normalized = value?.normalize("NFKC").replace(/\s+/g, "").toLowerCase();
+  return normalized !== undefined &&
+    (/^(?:web|ウェブ|オンライン|teams|チームズ|リモート)(?:会議|ミーティング)?$/.test(normalized) ||
+      WEB_REQUEST_ONLY.test(normalized));
 }
 const mockWorker = new MockBrowserWorker();
 const deskNetsWorker = new DeskNetsBrowserWorker();
@@ -236,6 +283,18 @@ async function route(
           prompt: await participantAliasStore.replaceAliases(submittedInput.prompt),
         }
       : submittedInput;
+    if (validatedInput.site === "desknets" && isWebMeetingEnabled()) {
+      // "WEB希望" is kept as a condition only. Creating the Teams meeting is a
+      // separate, explicit action taken after the date and time are settled, so
+      // selecting a candidate or redisplaying the card never creates one.
+      const webMeetingRequest = detectWebMeetingRequest(validatedInput.prompt);
+      if (webMeetingRequest !== undefined) {
+        await webMeetingStore.setRequested(
+          { userId: validatedInput.userId, threadId: validatedInput.threadId },
+          webMeetingRequest === "requested",
+        );
+      }
+    }
     const registeredFacilityPreferences = parseFacilityPreferenceRegistration(
       validatedInput.prompt,
     );
@@ -293,9 +352,9 @@ async function route(
       sendJson(response, 202, changed);
       return;
     }
-    const numberedMatch = validatedInput.prompt.normalize("NFKC").trim().match(/^(?:では|それでは|じゃあ)?[、,\s]*(\d+)(?:番|番目)?(?:で|を選んで|にして)(?:お願いします)?[。.!！]?$/);
-    let semanticAnalysis = savedConversation?.candidates !== undefined && numberedMatch !== null
-      ? { source: "deterministic" as const, task: { type: "select_booking_candidate" as const, candidateNumber: Number(numberedMatch[1]) } }
+    const selectedCandidate = readNumberedCandidateSelection(validatedInput.prompt);
+    let semanticAnalysis = savedConversation?.candidates !== undefined && selectedCandidate !== undefined
+      ? { source: "deterministic" as const, task: { type: "select_booking_candidate" as const, candidateNumber: selectedCandidate } }
       : validatedInput.site === "desknets" && readAzureOpenAIIntentConfig() !== undefined
       ? await analyzeDeskNetsIntent(validatedInput.prompt, new Date(), {
           conversationHistory: validatedInput.conversationHistory ?? [],
@@ -313,7 +372,7 @@ async function route(
             },
             currentProposal: pendingApproval?.result?.approvalRequest ?? (savedConversation?.selectedSlot === undefined ? null : {
               ...savedConversation.selectedSlot, facilityId:savedConversation.facilityId,
-              title:savedConversation.context.title ?? "打ち合わせ",emailNotificationWillBeSent:savedConversation.sendEmail ?? true,
+              title:savedConversation.context.title ?? "",emailNotificationWillBeSent:savedConversation.sendEmail ?? true,
             }),
             pendingParticipantChoice: pendingParticipantChoices.get(validatedInput.threadId) ?? null,
           },
@@ -333,7 +392,7 @@ async function route(
         semanticAnalysis = { source: "deterministic", task: {
           type: "book_meeting", facilityQuery: alternative.preferredQuery, excludePreviousFacility: true,
           selectedStart: start, selectedEnd: end,
-          title: proposal?.title ?? previous?.title ?? savedConversation.context.title ?? "打ち合わせ",
+          title: proposal?.title ?? previous?.title ?? savedConversation.context.title ?? "",
           sendEmail: proposal?.emailNotificationWillBeSent ?? previous?.sendEmail ?? true,
         } };
       }
@@ -544,9 +603,11 @@ async function route(
         );
         pendingBookings.set(validatedInput.threadId, conversation);
       }
-      const requestedFacilityQuery =
+      const hintedFacilityQuery =
         structuredCommand?.facility.preferred ??
         parseExplicitFacilityQuery(validatedInput.prompt);
+      const requestedFacilityQuery = isWebMeetingFacilityQuery(hintedFacilityQuery)
+        ? undefined : hintedFacilityQuery;
       const selectionContext = conversation === undefined
         ? undefined
         : {
@@ -581,7 +642,7 @@ async function route(
               ...(selectedFacilityQuery === undefined
                 ? {}
                 : { facilityQuery: selectedFacilityQuery }),
-              title: conversation?.context.title?.trim() || "打ち合わせ",
+              title: conversation?.context.title?.trim() || "",
               sendEmail: structuredCommand?.sendEmail ?? !/メール.*(?:しない|不要|なし)/.test(validatedInput.prompt),
               selectedStart: selectedSlot.start,
               selectedEnd: selectedSlot.end,
@@ -589,7 +650,13 @@ async function route(
           });
       let task = analysis.task;
       if ("facilityQuery" in task && task.facilityQuery !== undefined) {
-        task = { ...task, facilityQuery: parseFlexibleFacilityQuery(task.facilityQuery)?.query ?? task.facilityQuery };
+        const facilityQuery = parseFlexibleFacilityQuery(task.facilityQuery)?.query ?? task.facilityQuery;
+        if (isWebMeetingFacilityQuery(facilityQuery) && task.type === "book_meeting") {
+          const { facilityQuery: _webMeetingLabel, ...withoutFacility } = task;
+          task = withoutFacility as typeof task;
+        } else {
+          task = { ...task, facilityQuery };
+        }
       }
       run = { ...run, intentSource: analysis.source };
       if (task.type === "change_availability_duration") {
@@ -697,7 +764,7 @@ async function route(
         assertSlotHasNotStarted(selectedSlot);
         task = {
           type: "book_meeting", ...(conversation.facilityId === undefined ? {} : { facilityQuery: conversation.facilityId }),
-          title: conversation.context.title ?? "打ち合わせ",
+          title: conversation.context.title ?? "",
           sendEmail: structuredCommand?.sendEmail ?? true,
           selectedStart: selectedSlot.start, selectedEnd: selectedSlot.end,
         };
@@ -874,9 +941,7 @@ async function route(
         ...proposal, nativeUserIds: ("nativeUserIds" in proposal ? proposal.nativeUserIds : undefined) ?? run.result?.approvalRequest?.nativeUserIds,
       };
       const age = Date.now() - Date.parse(run.createdAt);
-      const superseded = Array.from(runs.values()).some(other => other.id !== run.id &&
-        other.input.userId === run.input.userId && other.input.threadId === run.input.threadId &&
-        Date.parse(other.createdAt) > Date.parse(run.createdAt));
+      const superseded = isRunSuperseded(run, runs.values());
       // Reopening is non-consuming. The owner may reopen a future, non-superseded
       // draft; buildDeskNetsHandoffUrl still rejects meetings that have started.
       if (superseded || !approval?.nativeUserIds || !Number.isFinite(age) || age < 0) {
@@ -893,6 +958,84 @@ async function route(
         sendJson(response,409,{message:error instanceof Error ? error.message : "引き渡しに失敗しました。"});
       }
       return;
+    }
+
+    if (segments.length === 4 && segments[3] === "web-meeting") {
+      if (isRunSuperseded(run, runs.values())) {
+        sendJson(response, 409, {
+          message: "このカードは新しい依頼により無効になりました。最新のカードを使用してください。",
+        });
+        return;
+      }
+      const owner = { userId: run.input.userId, threadId: run.input.threadId };
+      const settled = getReopenableBookingProposal(run);
+      if (settled === undefined) {
+        sendJson(response, 409, {
+          message: "このカードには有効な日時がありません。最新のカードを使用してください。",
+        });
+        return;
+      }
+      const schedule = { subject: settled.title, start: settled.start, end: settled.end };
+      if (request.method === "GET") {
+        response.setHeader("Cache-Control", "no-store");
+        sendJson(
+          response,
+          200,
+          isWebMeetingEnabled()
+            ? describeWebMeeting(await webMeetingStore.get(owner), schedule)
+            : describeWebMeeting(undefined),
+        );
+        return;
+      }
+      if (request.method === "POST") {
+        if (!isWebMeetingEnabled()) {
+          sendJson(response, 409, {
+            message: "この環境ではTeams WEB会議の発行が有効になっていません。管理者に連絡してください。",
+          });
+          return;
+        }
+        // The explicit "create the Teams meeting" action. Reachable only once the
+        // date and time are settled; the copy button never reaches this route.
+        const proposal = settled;
+        if (Date.parse(proposal.start) < Date.now()) {
+          sendJson(response, 409, {
+            message: "選択した開始時刻を過ぎたためTeams会議を作成できません。空き時間を再検索してください。",
+          });
+          return;
+        }
+        // Supplied server-to-server by AzureChat for the signed-in user; the
+        // organizer is always that operator. Never logged, never stored.
+        const accessToken = request.headers["x-graph-access-token"];
+        if (typeof accessToken !== "string" || accessToken.trim() === "") {
+          sendJson(response, 409, {
+            message: "Microsoft 365への接続が未設定です。管理者に連絡してください。",
+          });
+          return;
+        }
+        response.setHeader("Cache-Control", "no-store");
+        try {
+          const record = await ensureWebMeeting({
+            store: webMeetingStore,
+            client: new GraphWebMeetingClient(createGraphCall(accessToken)),
+            owner,
+            schedule: { subject: proposal.title, start: proposal.start, end: proposal.end },
+          });
+          sendJson(response, 200, describeWebMeeting(record, schedule));
+        } catch (error) {
+          if (error instanceof WebMeetingNotRequestedError) {
+            sendJson(response, 409, { message: error.message });
+            return;
+          }
+          if (error instanceof GraphRequestError) {
+            sendJson(response, 502, {
+              message: `${error.message} もう一度お試しください。既に作成された会議は作り直しません。`,
+            });
+            return;
+          }
+          throw error;
+        }
+        return;
+      }
     }
 
     if (
@@ -951,8 +1094,8 @@ async function route(
         throw new TypeError("title must be a string.");
       }
       const approvedTitle = approvalBody.title.normalize("NFKC").trim();
-      if (approvedTitle.length < 1 || approvedTitle.length > 100 || /[\r\n\t]/.test(approvedTitle)) {
-        throw new TypeError("title must contain between 1 and 100 characters on one line.");
+      if (approvedTitle.length > 100 || /[\r\n\t]/.test(approvedTitle)) {
+        throw new TypeError("title must contain at most 100 characters on one line.");
       }
       const approvalRequestedAt = Date.parse(run.approval?.requestedAt ?? run.updatedAt);
       if (!Number.isFinite(approvalRequestedAt) || Date.now() - approvalRequestedAt > 15 * 60_000) {
@@ -992,6 +1135,23 @@ export function getReopenableBookingProposal(run: BrowserRun) {
     return run.result?.manualActionRequest ?? run.result?.approvalRequest;
   }
   return undefined;
+}
+
+/** Runs are inserted in conversation order; updating one keeps its position. */
+export function isRunSuperseded(run: BrowserRun, candidates: Iterable<BrowserRun>): boolean {
+  let passedRun = false;
+  for (const candidate of candidates) {
+    if (candidate.id === run.id) {
+      passedRun = true;
+    } else if (
+      passedRun &&
+      candidate.input.userId === run.input.userId &&
+      candidate.input.threadId === run.input.threadId
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function restrictSlotToFacilityType(
@@ -1129,6 +1289,17 @@ function formatJapanInstant(value: string): string {
     minute: "2-digit",
     hourCycle: "h23",
   }).format(new Date(value));
+}
+
+/**
+ * 既定では無効。有効にするまで、WEB希望の保存も発行も情報表示も行わない。
+ * 委任スコープの同意を確認したうえで、TestSite側の同名フラグと合わせて有効にする。
+ * 要求ごとに読むので、プロセスを起動し直さずに切り替えられる。
+ */
+export function isWebMeetingEnabled(
+  configured = process.env.DESKNETS_WEB_MEETING_ENABLED,
+): boolean {
+  return configured?.trim() === "true";
 }
 
 export function isRunOwnerRequest(
@@ -1704,7 +1875,7 @@ export function buildRoomOnlyChangeTask(prompt: string, saved: PendingBookingCon
     ...(saved.facilityId === undefined ? {} : { previousFacilityId:saved.facilityId }),
     facilityQuery:query, ...((inferFacilityScope(query) ?? scope) === undefined ? {} : { facilityScope:(inferFacilityScope(query) ?? scope)! }),
     ...(change?.excludePrevious ? {excludePreviousFacility:true} : {}),
-    title:previous?.title ?? saved.context.title ?? "打ち合わせ", sendEmail:previous?.sendEmail ?? saved.sendEmail ?? true,
+    title:previous?.title ?? saved.context.title ?? "", sendEmail:previous?.sendEmail ?? saved.sendEmail ?? true,
     selectedStart:start, selectedEnd:end };
 }
 

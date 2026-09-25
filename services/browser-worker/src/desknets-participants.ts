@@ -50,3 +50,10 @@ export function preferParticipantOrganization<T extends { organization: string }
   const local = matches.filter(match => match.organization.includes(selector.organization!));
   return local.length === 0 && selector.organizationFallback ? matches : local;
 }
+
+/** The common spelling 高田 refers to 髙田 in this workflow. */
+export function participantNameSearchVariants(name: string): string[] {
+  if (name.startsWith("高田")) return [`髙田${name.slice(2)}`, name];
+  if (name.startsWith("髙田")) return [name, `高田${name.slice(2)}`];
+  return [name];
+}

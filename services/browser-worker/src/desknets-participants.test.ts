@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { resolveSelfOrganizationParticipants, preferParticipantOrganization } from "./desknets-participants.js";
+import { resolveSelfOrganizationParticipants, preferParticipantOrganization, participantNameSearchVariants } from "./desknets-participants.js";
 import { companyHolidayDates } from "./desknets-holidays.js";
+
+it("maps the common Takada spelling to 髙田 before trying the entered spelling", () => {
+  assert.deepEqual(participantNameSearchVariants("高田"), ["髙田", "高田"]);
+  assert.deepEqual(participantNameSearchVariants("高田廣明"), ["髙田廣明", "高田廣明"]);
+  assert.deepEqual(participantNameSearchVariants("髙田廣明"), ["髙田廣明", "高田廣明"]);
+  assert.deepEqual(participantNameSearchVariants("山本高田"), ["山本高田"]);
+});
 
 describe("resolveSelfOrganizationParticipants", () => {
   it("replaces self-department expressions with the logged-in user's DeskNet's organization", () => {

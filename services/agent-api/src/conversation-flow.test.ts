@@ -1,11 +1,21 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { DeskNetsBrowserWorker } from "@azure-browser-agent/browser-worker";
 import type { BrowserRun } from "@azure-browser-agent/agent-core";
-import { server } from "./server.js";
 
 test("Japanese thread: availability → start only → duration only → final approval card", async () => {
+  const meetingDirectory = await mkdtemp(join(tmpdir(), "web-meeting-flow-"));
+  const originalMeetingEnv = {
+    path: process.env.DESKNETS_WEB_MEETINGS_PATH,
+    enabled: process.env.DESKNETS_WEB_MEETING_ENABLED,
+  };
+  process.env.DESKNETS_WEB_MEETINGS_PATH = join(meetingDirectory, "meetings.json");
+  process.env.DESKNETS_WEB_MEETING_ENABLED = "true";
+  const { server } = await import("./server.js");
   const original = DeskNetsBrowserWorker.prototype.execute;
   const originalFetch = globalThis.fetch;
   const originalEnv = { endpoint: process.env.AZURE_OPENAI_ENDPOINT, key: process.env.AZURE_OPENAI_API_KEY, deployment: process.env.AZURE_OPENAI_DEPLOYMENT };
@@ -72,8 +82,15 @@ test("Japanese thread: availability → start only → duration only → final a
   };
   try {
     await send("2099年9月16日に私と髙田部長で打ち合わせ可能な日程を教えて");
-    const numbered = await send("では、１で");
+    const numbered = await send("では上記１で。WEB会議も設定して");
     assert.equal(numbered.status, "awaiting_approval", JSON.stringify(numbered));
+    assert.equal(numbered.result?.approvalRequest?.facilityId, "アクトミーティングルームC");
+    const webMeetingResponse = await fetch(`${base}/${numbered.id}/web-meeting`);
+    assert.equal(webMeetingResponse.status, 200);
+    const webMeetingView = await webMeetingResponse.json() as { requested: boolean; joinUrl?: string };
+    assert.equal(webMeetingView.requested, true);
+    assert.equal(webMeetingView.joinUrl, undefined, "WEB希望だけではGraph会議を発行しない");
+    assert.equal(numbered.result?.approvalRequest?.title, "", "unspecified title stays blank");
     assert.equal(numbered.result?.approvalRequest?.start, "2099-09-16T07:00:00.000Z");
     const selected = await send("では９/１６, １６時開始で");
     assert.equal(selected.status, "awaiting_approval", JSON.stringify(selected));
@@ -165,5 +182,10 @@ test("Japanese thread: availability → start only → duration only → final a
     DeskNetsBrowserWorker.prototype.execute = original;
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (originalMeetingEnv.path === undefined) delete process.env.DESKNETS_WEB_MEETINGS_PATH;
+    else process.env.DESKNETS_WEB_MEETINGS_PATH = originalMeetingEnv.path;
+    if (originalMeetingEnv.enabled === undefined) delete process.env.DESKNETS_WEB_MEETING_ENABLED;
+    else process.env.DESKNETS_WEB_MEETING_ENABLED = originalMeetingEnv.enabled;
+    await rm(meetingDirectory, { recursive: true, force: true });
   }
 });
