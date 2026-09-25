@@ -1024,8 +1024,11 @@ async function route(
           });
           return;
         }
+        // The explicit button click itself is the user's WEB meeting request.
+        // A separate chat message must not be required before creation.
         response.setHeader("Cache-Control", "no-store");
         try {
+          await webMeetingStore.setRequested(owner, true);
           const record = await ensureWebMeeting({
             store: webMeetingStore,
             client: new GraphWebMeetingClient(createGraphCall(accessToken)),
