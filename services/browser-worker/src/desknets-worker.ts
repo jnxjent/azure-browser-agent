@@ -20,7 +20,7 @@ import {
   type RunExecutor,
   type RunLimits,
 } from "@azure-browser-agent/agent-core";
-import { chromium, errors, type Browser, type Locator, type Page } from "playwright";
+import { chromium, errors, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
 import {
   extractFacilitySchedules,
   extractParticipantSchedules,
@@ -44,17 +44,22 @@ interface DeskNetsWorkerOptions {
   cdpEndpoint?: string;
   limits?: RunLimits;
   loadCredentials?: typeof loadDeskNetsCredentials;
+  isolatedContext?: boolean;
 }
 
 const DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222";
 
 export class DeskNetsBrowserWorker implements RunExecutor {
+  private static readonly connections = new Map<string, Promise<Browser>>();
   private readonly cdpEndpoint: string;
   private readonly limits: RunLimits;
+  // An existing browser can be supplied by local fixture tests.
   private browserConnection: Promise<Browser> | undefined;
+  private isolatedContext: BrowserContext | undefined;
   private scheduleUrl: string | undefined;
   private operationTail: Promise<unknown> = Promise.resolve();
   private readonly loadCredentials: typeof loadDeskNetsCredentials;
+  private readonly useIsolatedContext: boolean;
 
   constructor(options: DeskNetsWorkerOptions = {}) {
     this.cdpEndpoint =
@@ -63,6 +68,7 @@ export class DeskNetsBrowserWorker implements RunExecutor {
       DEFAULT_CDP_ENDPOINT;
     this.limits = options.limits ?? readLimitsFromEnvironment();
     this.loadCredentials = options.loadCredentials ?? loadDeskNetsCredentials;
+    this.useIsolatedContext = options.isolatedContext ?? false;
   }
 
   async execute(run: BrowserRun, signal: AbortSignal): Promise<BrowserRun> {
@@ -81,6 +87,14 @@ export class DeskNetsBrowserWorker implements RunExecutor {
     return operation;
   }
 
+  async resetIsolatedContext(): Promise<void> {
+    if (!this.useIsolatedContext) throw new Error("Cannot reset the shared DeskNet's session.");
+    await this.operationTail.catch(() => {});
+    const context = this.isolatedContext;
+    this.isolatedContext = undefined;
+    await context?.close().catch(() => {});
+  }
+
   private async executeOnce(run: BrowserRun, signal: AbortSignal): Promise<BrowserRun> {
     assertRunAllowed(run, this.limits);
     if (run.input.site !== "desknets") {
@@ -97,6 +111,10 @@ export class DeskNetsBrowserWorker implements RunExecutor {
     await mkdir(artifactDirectory, { recursive: true });
 
     const browser = await this.getBrowser();
+    const browserContext = this.useIsolatedContext
+      ? await this.getIsolatedContext(browser)
+      : browser.contexts()[0];
+    if (!browserContext) throw new Error("DeskNet's browser context is unavailable.");
     let page: Page | undefined;
     let preservePreparedForm = false;
     let primaryError: unknown;
@@ -105,13 +123,12 @@ export class DeskNetsBrowserWorker implements RunExecutor {
       if (run.task === undefined) {
         throw new Error("DeskNet's run does not contain a structured task.");
       }
-      page = await ensureSingleDeskNetsTab(browser, this.limits.allowedDomains);
+      page = await ensureSingleDeskNetsTab(browser, this.limits.allowedDomains,
+        this.useIsolatedContext ? browserContext : undefined);
       if (page === undefined) {
-        const startUrl = this.scheduleUrl ?? process.env.DESKNETS_START_URL;
-        if (!startUrl) throw new Error("専用EdgeでDeskNet'sのスケジュール画面を開いてください。");
+        const startUrl = this.scheduleUrl ?? process.env.DESKNETS_START_URL ??
+          "https://desknets.midac.jp/dneo/dneo.cgi?cmd=schindex#cmd=schweekgrp";
         assertActionAllowed({ type: "open_page", url: startUrl }, this.limits);
-        const browserContext = browser.contexts()[0];
-        if (!browserContext) throw new Error("DeskNet's専用ブラウザのセッションがありません。");
         page = await browserContext.newPage();
         authentication = new DeskNetsAuthentication(page, await this.loadCredentials(), new URL(startUrl).origin, signal);
         await authentication.attach();
@@ -186,24 +203,38 @@ export class DeskNetsBrowserWorker implements RunExecutor {
   }
 
   private async getBrowser(): Promise<Browser> {
-    if (this.browserConnection === undefined) {
+    if (this.browserConnection) return this.browserConnection;
+    let connection = DeskNetsBrowserWorker.connections.get(this.cdpEndpoint);
+    if (connection === undefined) {
       const connection = this.connectOrRecoverBrowser();
-      this.browserConnection = connection;
+      DeskNetsBrowserWorker.connections.set(this.cdpEndpoint, connection);
       void connection
         .then((browser) => {
           browser.once("disconnected", () => {
-            if (this.browserConnection === connection) this.browserConnection = undefined;
+            if (DeskNetsBrowserWorker.connections.get(this.cdpEndpoint) === connection) {
+              DeskNetsBrowserWorker.connections.delete(this.cdpEndpoint);
+            }
           });
         })
         .catch(() => {
-          if (this.browserConnection === connection) this.browserConnection = undefined;
+          if (DeskNetsBrowserWorker.connections.get(this.cdpEndpoint) === connection) {
+            DeskNetsBrowserWorker.connections.delete(this.cdpEndpoint);
+          }
         });
+      return connection;
     }
 
-    const browser = await this.browserConnection;
+    const browser = await connection;
     if (browser.isConnected()) return browser;
-    this.browserConnection = undefined;
+    DeskNetsBrowserWorker.connections.delete(this.cdpEndpoint);
+    this.isolatedContext = undefined;
     return this.getBrowser();
+  }
+
+  private async getIsolatedContext(browser: Browser): Promise<BrowserContext> {
+    if (this.isolatedContext?.browser() === browser) return this.isolatedContext;
+    this.isolatedContext = await browser.newContext();
+    return this.isolatedContext;
   }
 
   private async connectOrRecoverBrowser(): Promise<Browser> {

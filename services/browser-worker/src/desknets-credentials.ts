@@ -29,8 +29,9 @@ export function validateCredentials(value: unknown): DeskNetsCredentials {
 }
 
 /** DPAPI LocalMachine blob, in an ACL-restricted directory created by enrollment. */
-export async function loadDeskNetsCredentials(): Promise<CredentialLease | undefined> {
-  const file = process.env.DESKNETS_CREDENTIAL_FILE;
+export async function loadDeskNetsCredentials(
+  file = process.env.DESKNETS_CREDENTIAL_FILE,
+): Promise<CredentialLease | undefined> {
   if (!file) return undefined;
   try {
     if (process.platform !== "win32") throw new Error("Windows required");
@@ -38,7 +39,10 @@ export async function loadDeskNetsCredentials(): Promise<CredentialLease | undef
     if (!encrypted) return undefined;
     const revision = createHash("sha256").update(encrypted).digest("hex");
     const script = "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Security; $b=[IO.File]::ReadAllBytes($env:DESKNETS_CREDENTIAL_FILE); $p=[Security.Cryptography.ProtectedData]::Unprotect($b,$null,[Security.Cryptography.DataProtectionScope]::LocalMachine); [Console]::OutputEncoding=[Text.Encoding]::UTF8; [Console]::Write([Text.Encoding]::UTF8.GetString($p))";
-    const { stdout } = await execute("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true, timeout: 10_000, maxBuffer: 65536 });
+    const { stdout } = await execute("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+      windowsHide: true, timeout: 10_000, maxBuffer: 65536,
+      env: { ...process.env, DESKNETS_CREDENTIAL_FILE: file },
+    });
     const credentials = validateCredentials(JSON.parse(stdout.replace(/^\uFEFF/, "")));
     const lockFile = `${file}.blocked`;
     async function readBlocked(): Promise<string[]> {

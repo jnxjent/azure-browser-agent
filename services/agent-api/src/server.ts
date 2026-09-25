@@ -27,6 +27,11 @@ import {
   MockBrowserWorker,
   formatAvailabilityMessage,
   isMeetingRoomFacilityName,
+  hasDeskNetsUserCredentials,
+  deleteDeskNetsUserCredentials,
+  sharedDeskNetsEntranceReady,
+  saveDeskNetsUserCredentials,
+  loadDeskNetsUserCredentials,
 } from "@azure-browser-agent/browser-worker";
 import {
   facilityChangeFromStructuredCommand,
@@ -44,6 +49,8 @@ import {
 } from "./facility-preference-store.js";
 import { readStructuredCommandOrUndefined } from "./structured-command.js";
 import { WebMeetingStore } from "./web-meeting-store.js";
+import { RunScheduler } from "./run-scheduler.js";
+import { openCredentialEnvelope } from "./credential-envelope.js";
 import {
   GraphRequestError,
   GraphWebMeetingClient,
@@ -85,6 +92,9 @@ const pendingBookings = new Map<string, PendingBookingConversation>();
 // has actually succeeded (there's no PendingBookingContext yet to attach it
 // to — no availability, no participantIds).
 const pendingParticipantChoices = new Map<string, PendingParticipantChoice>();
+function conversationKey(input: Pick<CreateRunInput, "userId" | "threadId">): string {
+  return `${input.userId}\u0000${input.threadId}`;
+}
 const participantAliasStore = new ParticipantAliasStore(
   resolve(
     process.cwd(),
@@ -167,6 +177,44 @@ export function isWebMeetingFacilityQuery(value: string | null | undefined): boo
 const mockWorker = new MockBrowserWorker();
 const deskNetsWorker = new DeskNetsBrowserWorker();
 let deskNetsExecutionQueue: Promise<void> = Promise.resolve();
+const multiUserScheduler = new RunScheduler(3, 5);
+const personalWorkers = new Map<string, DeskNetsBrowserWorker>();
+const credentialUpdates = new Set<string>();
+let personalWorkerTail: Promise<unknown> = Promise.resolve();
+
+function multiUserDeskNetsEnabled(): boolean {
+  return process.env.DESKNETS_MULTI_USER_ENABLED === "true";
+}
+
+async function personalWorker(userId: string): Promise<DeskNetsBrowserWorker> {
+  const operation = personalWorkerTail.catch(() => {}).then(async () => {
+    let worker = personalWorkers.get(userId);
+    if (worker === undefined) {
+      await trimIdlePersonalWorkers(2);
+      worker = new DeskNetsBrowserWorker({
+        isolatedContext: true,
+        loadCredentials: () => loadDeskNetsUserCredentials(userId),
+      });
+      personalWorkers.set(userId, worker);
+    }
+    return worker;
+  });
+  personalWorkerTail = operation;
+  return operation;
+}
+
+async function trimIdlePersonalWorkers(limit = 3): Promise<void> {
+  if (personalWorkers.size <= limit) return;
+  for (const [userId, worker] of personalWorkers) {
+    if (personalWorkers.size <= limit) break;
+    const busy = Array.from(runs.values()).some((run) =>
+      run.input.site === "desknets" && run.input.userId === userId &&
+      ["queued", "running"].includes(run.status));
+    if (busy) continue;
+    personalWorkers.delete(userId);
+    await worker.resetIsolatedContext();
+  }
+}
 
 export const server = createServer(async (request, response) => {
   setCorsHeaders(request, response);
@@ -217,9 +265,94 @@ async function route(
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://localhost");
   const segments = url.pathname.split("/").filter(Boolean);
+  if (multiUserDeskNetsEnabled()) response.setHeader("X-DeskNets-Async-Queue", "1");
 
   if (request.method === "GET" && url.pathname === "/health") {
     sendJson(response, 200, { status: "ok" });
+    return;
+  }
+
+  if (url.pathname === "/browser-agent/credentials" &&
+      (request.method === "GET" || request.method === "POST" || request.method === "DELETE")) {
+    if (!process.env.AGENT_API_KEY?.trim()) {
+      sendJson(response, 503, { error: "Credential enrollment requires an API key." });
+      return;
+    }
+    if (!multiUserDeskNetsEnabled()) {
+      sendJson(response, 404, { error: "Personal DeskNet's sessions are disabled." });
+      return;
+    }
+    const userId = request.headers["x-user-id"];
+    if (typeof userId !== "string" || !/^[a-f0-9]{64}$/.test(userId)) {
+      sendJson(response, 400, { error: "Invalid user identity." });
+      return;
+    }
+    response.setHeader("Cache-Control", "no-store");
+    if (request.method === "GET") {
+      sendJson(response, 200, {
+        registered: await hasDeskNetsUserCredentials(userId),
+        sharedReady: await sharedDeskNetsEntranceReady(),
+        transportReady: /^[A-Za-z0-9_-]{43}$/.test(process.env.DESKNETS_CREDENTIAL_TRANSPORT_KEY ?? ""),
+      });
+      return;
+    }
+    if (credentialUpdates.has(userId)) {
+      sendJson(response, 409, { error: "DeskNet's credentials are already being updated." });
+      return;
+    }
+    credentialUpdates.add(userId);
+    try {
+      if (Array.from(runs.values()).some((run) => run.input.userId === userId &&
+          run.input.site === "desknets" && ["queued", "running"].includes(run.status))) {
+        sendJson(response, 409, { error: "Wait for the current DeskNet's operation to finish." });
+        return;
+      }
+      if (request.method === "DELETE") {
+        await personalWorkers.get(userId)?.resetIsolatedContext();
+        await deleteDeskNetsUserCredentials(userId);
+        personalWorkers.delete(userId);
+        sendJson(response, 200, { registered: false });
+        return;
+      }
+      if (!/^[A-Za-z0-9_-]{43}$/.test(process.env.DESKNETS_CREDENTIAL_TRANSPORT_KEY ?? "")) {
+        sendJson(response, 503, { error: "DeskNet's credential transport key is not configured." });
+        return;
+      }
+      const body = await readJsonBody(request);
+      const credentials = openCredentialEnvelope(body, userId);
+      await saveDeskNetsUserCredentials(userId, credentials.username, credentials.password);
+      await personalWorkers.get(userId)?.resetIsolatedContext();
+      sendJson(response, 200, { registered: true });
+    } finally {
+      credentialUpdates.delete(userId);
+    }
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/browser-agent/queue") {
+    if (!multiUserDeskNetsEnabled()) {
+      sendJson(response, 200, { status: "idle" });
+      return;
+    }
+    const userId = request.headers["x-user-id"];
+    const threadId = request.headers["x-chat-thread-id"];
+    if (typeof userId !== "string" || !/^[a-f0-9]{64}$/.test(userId) ||
+        typeof threadId !== "string" || threadId !== url.searchParams.get("threadId")) {
+      sendJson(response, 400, { error: "Invalid queue identity." });
+      return;
+    }
+    const latest = Array.from(runs.values()).reverse().find((run) =>
+      run.input.site === "desknets" && run.input.userId === userId &&
+      run.input.threadId === threadId);
+    response.setHeader("Cache-Control", "no-store");
+    sendJson(response, 200, {
+      status: latest?.status ?? "idle",
+      runId: latest?.id,
+      waitingPosition: latest === undefined ? undefined : multiUserScheduler.waitingPosition(latest.id),
+      activeCount: multiUserDeskNetsEnabled() ? multiUserScheduler.activeCount : undefined,
+      waitingCount: multiUserDeskNetsEnabled() ? multiUserScheduler.waitingCount : undefined,
+      capacity: multiUserDeskNetsEnabled() ? 5 : undefined,
+    });
     return;
   }
 
@@ -277,12 +410,26 @@ async function route(
       ),
     );
     const submittedInput = validateCreateRunInput(requestBody);
+    if (submittedInput.site === "desknets" && multiUserDeskNetsEnabled() &&
+        (request.headers["x-user-id"] !== submittedInput.userId ||
+         request.headers["x-chat-thread-id"] !== submittedInput.threadId)) {
+      sendJson(response, 403, { status: "failed", message: "DeskNet's の利用者情報が一致しません。再度ログインしてください。" });
+      return;
+    }
     const validatedInput = submittedInput.site === "desknets"
       ? {
           ...submittedInput,
           prompt: await participantAliasStore.replaceAliases(submittedInput.prompt),
         }
       : submittedInput;
+    if (validatedInput.site === "desknets" && multiUserDeskNetsEnabled() &&
+        multiUserScheduler.admittedCount >= 5) {
+      sendJson(response, 429, {
+        status: "failed",
+        message: "DeskNet's の依頼は現在５件受付中です。少し待ってからもう一度お試しください。",
+      });
+      return;
+    }
     if (validatedInput.site === "desknets" && isWebMeetingEnabled()) {
       // "WEB希望" is kept as a condition only. Creating the Teams meeting is a
       // separate, explicit action taken after the date and time are settled, so
@@ -301,6 +448,8 @@ async function route(
             getReopenableBookingProposal(run) !== undefined &&
             !isRunSuperseded(run, runs.values()));
           if (existingCard !== undefined) {
+            // Return the existing run ID: the prior approval card remains valid.
+            // No DeskNet's browser operation or Graph call is needed here.
             sendJson(response, 202, { ...existingCard, webMeetingAdded: true });
             return;
           }
@@ -332,7 +481,7 @@ async function route(
     const pendingApproval = validatedInput.site === "desknets"
       ? findPendingApproval(validatedInput.userId, validatedInput.threadId)
       : undefined;
-    const savedConversation = pendingBookings.get(validatedInput.threadId);
+    const savedConversation = pendingBookings.get(conversationKey(validatedInput));
     if (validatedInput.site === "desknets" && savedConversation !== undefined &&
         isAvailabilityRefreshRequest(validatedInput.prompt) && !hasExplicitSearchPeriod(validatedInput.prompt)) {
       const context = savedConversation.context;
@@ -386,7 +535,7 @@ async function route(
               ...savedConversation.selectedSlot, facilityId:savedConversation.facilityId,
               title:savedConversation.context.title ?? "",emailNotificationWillBeSent:savedConversation.sendEmail ?? true,
             }),
-            pendingParticipantChoice: pendingParticipantChoices.get(validatedInput.threadId) ?? null,
+            pendingParticipantChoice: pendingParticipantChoices.get(conversationKey(validatedInput)) ?? null,
           },
           requireLlm: true,
         })
@@ -449,7 +598,7 @@ async function route(
         allFacilityAvailability: resizedAvailability,
       };
       cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId);
-      pendingBookings.set(validatedInput.threadId, {
+      pendingBookings.set(conversationKey(validatedInput), {
         context: resizedContext,
         facilityId: approval.facilityId,
       });
@@ -550,7 +699,7 @@ async function route(
     }
     let run = createRun(validatedInput);
     if (validatedInput.site === "desknets") {
-      const awaitingConversation = pendingBookings.get(validatedInput.threadId);
+      const awaitingConversation = pendingBookings.get(conversationKey(validatedInput));
       if (
         awaitingConversation?.awaitingFacilityChoice !== undefined &&
         semanticAnalysis === undefined &&
@@ -569,15 +718,15 @@ async function route(
         );
         return;
       }
-      const awaitingParticipantChoice = pendingParticipantChoices.get(validatedInput.threadId);
+      const awaitingParticipantChoice = pendingParticipantChoices.get(conversationKey(validatedInput));
       if (awaitingParticipantChoice !== undefined && semanticAnalysis === undefined) {
         if (isFreshAvailabilityRequest(validatedInput.prompt)) {
           // A complete new availability request supersedes the unresolved
           // organization question. Drop only that question and let the new
           // prompt continue through the normal intent-analysis path below.
-          pendingParticipantChoices.delete(validatedInput.threadId);
+          pendingParticipantChoices.delete(conversationKey(validatedInput));
         } else if (isParticipantChoiceCancellationRequest(validatedInput.prompt)) {
-          pendingParticipantChoices.delete(validatedInput.threadId);
+          pendingParticipantChoices.delete(conversationKey(validatedInput));
           const cancelledChoice: BrowserRun = {
             ...run,
             input: { ...validatedInput, mode: "read" },
@@ -597,7 +746,7 @@ async function route(
           return;
         }
       }
-      let conversation = pendingBookings.get(validatedInput.threadId);
+      let conversation = pendingBookings.get(conversationKey(validatedInput));
       const semanticTask = semanticAnalysis?.task;
       const semanticDuration = semanticTask?.type === "book_meeting" && semanticTask.selectedStart && semanticTask.selectedEnd
         ? (Date.parse(semanticTask.selectedEnd) - Date.parse(semanticTask.selectedStart)) / 60000 : undefined;
@@ -613,7 +762,7 @@ async function route(
           conversation,
           conversationDurationChange,
         );
-        pendingBookings.set(validatedInput.threadId, conversation);
+        pendingBookings.set(conversationKey(validatedInput), conversation);
       }
       const hintedFacilityQuery =
         structuredCommand?.facility.preferred ??
@@ -693,7 +842,7 @@ async function route(
       }
       if (task.type === "find_availability") {
         task = inheritAvailabilityPreferences(task, conversation?.context, validatedInput.prompt);
-        pendingParticipantChoices.delete(validatedInput.threadId);
+        pendingParticipantChoices.delete(conversationKey(validatedInput));
         if (isEarliestMeetingRequest(validatedInput.prompt)) {
           task = { ...task, selectionMode: "earliest", autoExtendSearch: !hasExplicitSearchPeriod(validatedInput.prompt) };
         }
@@ -726,7 +875,7 @@ async function route(
           throw new TypeError(`${facilityId}が空いている候補はありません。`);
         }
         const candidates = matchingCandidates.slice(0, 50);
-        pendingBookings.set(validatedInput.threadId, {
+        pendingBookings.set(conversationKey(validatedInput), {
           context: conversation.context,
           facilityId,
           candidates,
@@ -755,7 +904,7 @@ async function route(
           );
         }
         const redisplay = buildShowCandidatesResponse(conversation);
-        pendingBookings.set(validatedInput.threadId, clearTransientConversationFlags(conversation));
+        pendingBookings.set(conversationKey(validatedInput), clearTransientConversationFlags(conversation));
         run = {
           ...run,
           input: { ...validatedInput, mode: "read" },
@@ -806,7 +955,7 @@ async function route(
         // Deliberately not deleted: if the user changes their mind before
         // manually clicking DeskNet's own "追加", show_candidates needs the
         // conversation's availability data to still be here.
-        pendingBookings.set(validatedInput.threadId, clearTransientConversationFlags(conversation));
+        pendingBookings.set(conversationKey(validatedInput), clearTransientConversationFlags(conversation));
       } else if (task.type === "book_meeting") {
         if (conversation === undefined) {
           throw new TypeError(
@@ -860,7 +1009,7 @@ async function route(
           const facilityScope = task.facilityQuery === undefined
             ? undefined
             : inferFacilityScope(task.facilityQuery);
-          pendingBookings.set(validatedInput.threadId, {
+          pendingBookings.set(conversationKey(validatedInput), {
             ...conversation,
             awaitingFacilityChoice: {
               excludedFacilities: task.facilityQuery === undefined ? [] : [task.facilityQuery],
@@ -896,7 +1045,7 @@ async function route(
         }
         assertSlotHasNotStarted(slot);
         // Deliberately not deleted here either — see the comment above.
-        pendingBookings.set(validatedInput.threadId, { ...clearTransientConversationFlags(conversation), selectedSlot: slot, facilityId });
+        pendingBookings.set(conversationKey(validatedInput), { ...clearTransientConversationFlags(conversation), selectedSlot: slot, facilityId });
         run = {
           ...run,
           input: { ...validatedInput, mode: "write" },
@@ -1068,7 +1217,14 @@ async function route(
     }
 
     if (request.method === "GET" && segments.length === 3) {
-      sendJson(response, 200, run);
+      sendJson(response, 200, multiUserDeskNetsEnabled() && run.input.site === "desknets"
+        ? { ...run, queue: {
+            waitingPosition: multiUserScheduler.waitingPosition(run.id),
+            activeCount: multiUserScheduler.activeCount,
+            waitingCount: multiUserScheduler.waitingCount,
+            capacity: 5,
+          } }
+        : run);
       return;
     }
 
@@ -1340,6 +1496,39 @@ function startRun(runId: string): void {
   const run = runs.get(runId);
   if (run === undefined) return;
   if (run.input.site === "desknets") {
+    if (multiUserDeskNetsEnabled()) {
+      if (credentialUpdates.has(run.input.userId)) {
+        runs.set(runId, {
+          ...run,
+          status: "failed",
+          updatedAt: new Date().toISOString(),
+          error: "DeskNet's のログイン情報を更新中です。保存後にもう一度お試しください。",
+        });
+        return;
+      }
+      const sameUserBusy = Array.from(runs.values()).some((other) =>
+        other.id !== runId && other.input.site === "desknets" &&
+        other.input.userId === run.input.userId &&
+        ["queued", "running"].includes(other.status));
+      if (sameUserBusy) {
+        runs.set(runId, {
+          ...run,
+          status: "failed",
+          updatedAt: new Date().toISOString(),
+          error: "DeskNet's の前の依頼が処理中です。完了してからお試しください。",
+        });
+        return;
+      }
+      if (!multiUserScheduler.admit(runId, () => executeRun(runId))) {
+        runs.set(runId, {
+          ...run,
+          status: "failed",
+          updatedAt: new Date().toISOString(),
+          error: "DeskNet's Agent is currently accepting up to five requests. Please try again later.",
+        });
+      }
+      return;
+    }
     deskNetsExecutionQueue = deskNetsExecutionQueue.then(
       () => executeRun(runId),
       () => executeRun(runId),
@@ -1396,9 +1585,10 @@ async function executeRun(runId: string): Promise<void> {
   };
   runs.set(runId, running);
 
-  const worker =
-    running.input.site === "desknets" ? deskNetsWorker : mockWorker;
   try {
+    const worker = running.input.site === "desknets"
+      ? multiUserDeskNetsEnabled() ? await personalWorker(running.input.userId) : deskNetsWorker
+      : mockWorker;
     let completed = await worker.execute(running, controller.signal);
     if (
       completed.task?.type === "find_availability" &&
@@ -1419,12 +1609,12 @@ async function executeRun(runId: string): Promise<void> {
             (slot) => slot.start === proposal.start && slot.end === proposal.end,
           );
       pendingBookings.set(
-        completed.input.threadId,
+        conversationKey(completed.input),
         proposal === undefined || selectedSlot === undefined
           ? { context: pending, candidates: [...pending.availability].sort((a, b) => Date.parse(a.start) - Date.parse(b.start)).slice(0, 50) }
           : {
               context: pending,
-              candidates: pendingBookings.get(completed.input.threadId)?.candidates ?? [...pending.availability].sort((a, b) => Date.parse(a.start) - Date.parse(b.start)).slice(0, 50),
+              candidates: pendingBookings.get(conversationKey(completed.input))?.candidates ?? [...pending.availability].sort((a, b) => Date.parse(a.start) - Date.parse(b.start)).slice(0, 50),
               facilityId: proposal.facilityId,
               sendEmail: completed.task?.type === "book_meeting" ? completed.task.sendEmail : true,
               selectedSlot,
@@ -1432,13 +1622,13 @@ async function executeRun(runId: string): Promise<void> {
             },
       );
       if (proposal !== undefined) {
-        const saved = pendingBookings.get(completed.input.threadId)!;
+        const saved = pendingBookings.get(conversationKey(completed.input))!;
         saved.context = { ...saved.context, title: proposal.title };
       }
       if (completed.task?.type === "book_meeting" && completed.result?.facilityAlternatives !== undefined) {
         const task = completed.task;
         const retainedSlot = pending.availability.find(slot => slot.start === task.selectedStart && slot.end === task.selectedEnd);
-        pendingBookings.set(completed.input.threadId, {
+        pendingBookings.set(conversationKey(completed.input), {
           context: pending,
           sendEmail: task.sendEmail,
           ...(task.previousFacilityId === undefined ? {} : { facilityId:task.previousFacilityId }),
@@ -1453,7 +1643,7 @@ async function executeRun(runId: string): Promise<void> {
     }
     const participantChoice = completed.result?.participantChoice;
     if (participantChoice !== undefined) {
-      pendingParticipantChoices.set(completed.input.threadId, participantChoice);
+      pendingParticipantChoices.set(conversationKey(completed.input), participantChoice);
     }
   } catch (error: unknown) {
     const current = runs.get(runId);
@@ -1462,8 +1652,8 @@ async function executeRun(runId: string): Promise<void> {
     if (current !== undefined) {
       if (current.task?.type === "book_meeting" && current.context !== undefined && /埋まっています/.test(message)
           && current.task.selectedStart !== undefined && current.task.selectedEnd !== undefined) {
-        const previous = pendingBookings.get(current.input.threadId);
-        pendingBookings.set(current.input.threadId, {
+        const previous = pendingBookings.get(conversationKey(current.input));
+        pendingBookings.set(conversationKey(current.input), {
           ...previous, context: current.context,
           awaitingFacilityChoice: {
             selectedStart: current.task.selectedStart, selectedEnd: current.task.selectedEnd,
@@ -1482,6 +1672,7 @@ async function executeRun(runId: string): Promise<void> {
     }
   } finally {
     controllers.delete(runId);
+    if (multiUserDeskNetsEnabled()) await trimIdlePersonalWorkers();
   }
 }
 
@@ -1518,6 +1709,7 @@ function cancelRun(run: BrowserRun): void {
     return;
   }
   controllers.get(run.id)?.abort(new Error("Run cancelled by user."));
+  multiUserScheduler.removeWaiting(run.id);
   runs.set(run.id, {
     ...run,
     status: "cancelled",
@@ -2173,7 +2365,7 @@ function handleFacilityChoiceReply(
     (candidate) => candidate.start === pending.selectedStart && candidate.end === pending.selectedEnd,
   );
   if (slot === undefined || slot.availableFacilityIds.length === 0) {
-    pendingBookings.delete(validatedInput.threadId);
+    pendingBookings.delete(conversationKey(validatedInput));
     throw new TypeError("指定した日時の候補が失われました。空き時間を再検索してください。");
   }
   let facilityId: string;
@@ -2222,7 +2414,7 @@ function handleFacilityChoiceReply(
     availability: companyWideAvailability,
   };
   pendingBookings.set(
-    validatedInput.threadId,
+    conversationKey(validatedInput),
     clearTransientConversationFlags({ ...conversation, context: companyWideContext }),
   );
   const resolved: BrowserRun = {
@@ -2336,7 +2528,7 @@ function handleParticipantChoiceReply(
     return;
   }
   const matchedOrganization = matches[0] as string;
-  pendingParticipantChoices.delete(validatedInput.threadId);
+  pendingParticipantChoices.delete(conversationKey(validatedInput));
   const participants = pending.task.participants.map((participant, index) =>
     index === pending.participantIndex
       ? { ...participant, organization: matchedOrganization, organizationFallback: false }

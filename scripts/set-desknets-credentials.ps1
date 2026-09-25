@@ -1,6 +1,7 @@
 param(
   [string]$Origin = 'https://desknets.midac.jp',
-  [string]$Directory = 'C:\BrowserAgent\shared\credentials'
+  [string]$Directory = 'C:\BrowserAgent\shared\credentials',
+  [switch]$SharedOnly
 )
 # Run interactively as abaops on the TestSite VM. Never pass passwords as arguments.
 $ErrorActionPreference = 'Stop'
@@ -9,6 +10,10 @@ if ($env:USERNAME -ne 'abaops') { throw 'Run as the BrowserAgent interactive use
 $uri = [Uri]$Origin
 if ($uri.Scheme -ne 'https' -or $uri.GetLeftPart([UriPartial]::Authority) -ne $Origin -or $uri.UserInfo) {throw 'An HTTPS origin without a path is required.'}
 Add-Type -AssemblyName System.Security
+$targetFile = Join-Path $Directory 'desknets.bin'
+if ($SharedOnly -and (Test-Path -LiteralPath $targetFile)) {
+  throw 'SharedOnly will not replace an existing credential file. Use the normal enrollment flow to update both existing credentials.'
+}
 New-Item -ItemType Directory -Force -Path $Directory | Out-Null
 $acl = New-Object Security.AccessControl.DirectorySecurity
 $acl.SetAccessRuleProtection($true,$false)
@@ -28,11 +33,12 @@ function Read-Pair($label) {
     return @{username=$user;password=$password}
   } finally {[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr);$secret.Dispose()}
 }
-$data = @{origin=$Origin;basic=(Read-Pair 'BASIC');app=(Read-Pair 'DeskNets')}
+$data = @{origin=$Origin;basic=(Read-Pair 'BASIC')}
+if (-not $SharedOnly) { $data.app = Read-Pair 'DeskNets' }
 try {
   $bytes = [Text.Encoding]::UTF8.GetBytes(($data | ConvertTo-Json -Compress))
   $encrypted = [Security.Cryptography.ProtectedData]::Protect($bytes,$null,[Security.Cryptography.DataProtectionScope]::LocalMachine)
-  [IO.File]::WriteAllBytes((Join-Path $Directory 'desknets.bin'),$encrypted)
+  [IO.File]::WriteAllBytes($targetFile,$encrypted)
   Write-Host 'Encrypted credentials saved. Retry your request in TestSite.'
 } finally {
   if ($bytes) {[Array]::Clear($bytes,0,$bytes.Length)}

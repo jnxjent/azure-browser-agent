@@ -13,9 +13,12 @@ export function isHttpAuthError(error: unknown): boolean {
 
 /** Attaches only for a worker operation; never changes the user's Edge profile. */
 export class DeskNetsAuthentication {
+  private static basicSubmissionTail: Promise<void> = Promise.resolve();
+  private static basicInFlight = 0;
   private session: CDPSession | undefined;
   private httpFailed = false;
   private attempts = new Set<string>();
+  private pendingBasic = new Set<string>();
   private appAttempted = false;
   private pending = new Set<Promise<unknown>>();
   constructor(private page: Page, private lease: CredentialLease | undefined, private origin: string, private signal: AbortSignal) {}
@@ -33,6 +36,7 @@ export class DeskNetsAuthentication {
       track((async () => {
         if (this.attempts.has(event.requestId) && event.responseStatusCode !== undefined && event.responseStatusCode >= 200 && event.responseStatusCode < 400) {
           await this.lease!.clear("basic");
+          this.releaseBasic(event.requestId);
         }
         await session.send("Fetch.continueRequest", { requestId: event.requestId });
       })());
@@ -45,15 +49,34 @@ export class DeskNetsAuthentication {
           await session.send("Fetch.continueWithAuth", { requestId: event.requestId, authChallengeResponse: { response: "CancelAuth" } });
           return;
         }
-        if (this.attempts.has(event.requestId) || await this.lease!.blocked("basic")) {
+        if (this.attempts.has(event.requestId)) {
+          this.releaseBasic(event.requestId);
           this.httpFailed = true;
           await session.send("Fetch.continueWithAuth", { requestId: event.requestId, authChallengeResponse: { response: "CancelAuth" } });
           return;
         }
-        // Persist before sending: crashes/restarts cannot repeatedly submit bad credentials.
-        await this.lease!.block("basic");
-        this.attempts.add(event.requestId);
-        await session.send("Fetch.continueWithAuth", { requestId: event.requestId, authChallengeResponse: { response: "ProvideCredentials", ...this.lease!.credentials.basic! } });
+        // The shared entrance credentials are used by separate personal contexts.
+        // Wait for an in-flight successful challenge before attempting another;
+        // a failed challenge stays blocked and is never retried automatically.
+        const submit = DeskNetsAuthentication.basicSubmissionTail.catch(() => {}).then(async () => {
+          const deadline = Date.now() + 15_000;
+          while (await this.lease!.blocked("basic")) {
+            if (this.signal.aborted || DeskNetsAuthentication.basicInFlight === 0 || Date.now() >= deadline) {
+              this.httpFailed = true;
+              await session.send("Fetch.continueWithAuth", { requestId: event.requestId, authChallengeResponse: { response: "CancelAuth" } });
+              return;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          // Persist before sending: crashes/restarts cannot repeatedly submit bad credentials.
+          await this.lease!.block("basic");
+          this.attempts.add(event.requestId);
+          this.pendingBasic.add(event.requestId);
+          DeskNetsAuthentication.basicInFlight++;
+          await session.send("Fetch.continueWithAuth", { requestId: event.requestId, authChallengeResponse: { response: "ProvideCredentials", ...this.lease!.credentials.basic! } });
+        });
+        DeskNetsAuthentication.basicSubmissionTail = submit;
+        await submit;
       })());
     });
     await session.send("Fetch.enable", { handleAuthRequests: true, patterns: [{urlPattern:"*",requestStage:"Request"},{urlPattern:"*",requestStage:"Response"}] });
@@ -113,8 +136,13 @@ export class DeskNetsAuthentication {
   }
 
   assertHealthy(): void { if (this.httpFailed) throw new DeskNetsAuthenticationError("DeskNet's入口のBASIC認証に失敗しました。認証情報を更新してください。"); }
+  private releaseBasic(requestId: string): void {
+    if (!this.pendingBasic.delete(requestId)) return;
+    DeskNetsAuthentication.basicInFlight--;
+  }
   async dispose(): Promise<void> {
     await Promise.allSettled([...this.pending]);
+    for (const requestId of this.pendingBasic) this.releaseBasic(requestId);
     await this.session?.detach().catch(() => {});
   }
 }

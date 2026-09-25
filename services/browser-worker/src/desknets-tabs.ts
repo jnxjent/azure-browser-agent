@@ -1,11 +1,13 @@
-import type { Browser, Page } from "playwright";
+import type { Browser, BrowserContext, Page } from "playwright";
 
 /** Keep one schedule tab in the dedicated CDP browser, preserving its draft. */
 export async function ensureSingleDeskNetsTab(
   browser: Browser,
   allowedDomains: readonly string[],
+  selectedContext?: BrowserContext,
 ): Promise<Page | undefined> {
-  const pages = browser.contexts().flatMap((context) => context.pages()).filter((page) => {
+  const contexts = selectedContext === undefined ? browser.contexts() : [selectedContext];
+  const pages = contexts.flatMap((context) => context.pages()).filter((page) => {
     const url = new URL(page.url());
     return allowedDomains.some((domain) => {
       const host = domain.toLowerCase();

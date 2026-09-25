@@ -46,3 +46,14 @@ test("does not touch unrelated domains or different application paths", async ()
   await assert.rejects(ensureSingleDeskNetsTab(browser, ["desk.example"]));
   assert.equal(pages.some((page) => page.closed), false);
 });
+
+test("isolated context leaves another user's DeskNet's tabs untouched", async () => {
+  const first = fixture(["schweekgrp", "schaddtarget"]);
+  const second = fixture(["schweekgrp", "schaddtarget"]);
+  const firstContext = first.browser.contexts()[0]!;
+  const secondContext = second.browser.contexts()[0]!;
+  const browser = { contexts: () => [firstContext, secondContext] } as unknown as Browser;
+  assert.equal(await ensureSingleDeskNetsTab(browser, ["desk.example"], firstContext), first.pages[1]);
+  assert.deepEqual(first.pages.map((page) => page.closed), [true, false]);
+  assert.deepEqual(second.pages.map((page) => page.closed), [false, false]);
+});

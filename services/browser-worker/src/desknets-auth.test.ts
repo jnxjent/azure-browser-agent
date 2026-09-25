@@ -5,6 +5,7 @@ import { chromium } from "playwright";
 import { DeskNetsAuthentication, DeskNetsAuthenticationError } from "./desknets-auth.js";
 import { validateCredentials, type CredentialLease } from "./desknets-credentials.js";
 import { loadDeskNetsCredentials } from "./desknets-credentials.js";
+import { deleteDeskNetsUserCredentials, hasDeskNetsUserCredentials, loadDeskNetsUserCredentials, saveDeskNetsUserCredentials } from "./desknets-user-credentials.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
@@ -67,6 +68,31 @@ test("BASIC and app login recover; a later cookie expiry can recover again", asy
     assert.equal(f.stats.login,2);
     assert.equal(f.stats.registrations,0);
   } finally {await browser.close();await f.close();}
+});
+
+test("separate personal contexts can pass the shared BASIC entrance concurrently", async () => {
+  const f = await fixture();
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const contexts = await Promise.all([browser.newContext(), browser.newContext()]);
+    await Promise.all(contexts.map(async (context) => {
+      const page = await context.newPage();
+      const auth = new DeskNetsAuthentication(page, f.lease, f.origin, new AbortController().signal);
+      try {
+        await auth.attach();
+        await page.goto(`${f.origin}/dneo.cgi?cmd=schindex`);
+        assert.equal(await auth.recoverLogin(), true);
+        auth.assertHealthy();
+      } finally {
+        await auth.dispose();
+      }
+    }));
+    assert.equal(f.stats.login, 2);
+    assert.equal(f.blocked.size, 0);
+  } finally {
+    await browser.close();
+    await f.close();
+  }
 });
 
 test("wrong BASIC credentials are attempted once and locked across recovery instances", async () => {
@@ -145,5 +171,42 @@ test("DPAPI store survives reload, locks failures, and credential replacement re
   }finally{
     if(previous===undefined)delete process.env.DESKNETS_CREDENTIAL_FILE;else process.env.DESKNETS_CREDENTIAL_FILE=previous;
     await rm(directory,{recursive:true,force:true});
+  }
+});
+
+test("personal DeskNet's credentials remain separate from shared BASIC credentials", { skip: process.platform !== "win32" }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "desknets-personal-credential-test-"));
+  const previous = process.env.DESKNETS_CREDENTIAL_FILE;
+  process.env.DESKNETS_CREDENTIAL_FILE = join(directory, "desknets.bin");
+  const userId = "a".repeat(64);
+  try {
+    const shared = JSON.stringify({ origin: "https://desknets.midac.jp", basic: { username: "midac", password: "shared-test-secret" } });
+    const script = "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Security; $p=[Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes([Console]::In.ReadToEnd()),$null,[Security.Cryptography.DataProtectionScope]::LocalMachine);[Console]::Write([Convert]::ToBase64String($p))";
+    const encrypted = await new Promise<Buffer>((resolve, reject) => {
+      const child = execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true }, (error, stdout) =>
+        error ? reject(error) : resolve(Buffer.from(stdout.trim(), "base64")));
+      child.stdin?.end(shared);
+    });
+    await writeFile(process.env.DESKNETS_CREDENTIAL_FILE, encrypted);
+    assert.equal(await hasDeskNetsUserCredentials(userId), false);
+    await assert.rejects(() => loadDeskNetsUserCredentials(userId), /未登録/);
+    await saveDeskNetsUserCredentials(userId, "employee-a", "個人パスワード-test");
+    assert.equal(await hasDeskNetsUserCredentials(userId), true);
+    const lease = await loadDeskNetsUserCredentials(userId);
+    assert.equal(lease?.credentials.basic?.username, "midac");
+    assert.equal(lease?.credentials.app?.username, "employee-a");
+    assert.equal(lease?.credentials.app?.password, "個人パスワード-test");
+    await lease?.block("app");
+    await saveDeskNetsUserCredentials(userId, "employee-a", "replacement-test-secret");
+    const replacement = await loadDeskNetsUserCredentials(userId);
+    assert.equal(replacement?.credentials.app?.password, "replacement-test-secret");
+    assert.equal(await replacement?.blocked("app"), false);
+    await deleteDeskNetsUserCredentials(userId);
+    assert.equal(await hasDeskNetsUserCredentials(userId), false);
+    await assert.rejects(() => hasDeskNetsUserCredentials("../other"));
+  } finally {
+    if (previous === undefined) delete process.env.DESKNETS_CREDENTIAL_FILE;
+    else process.env.DESKNETS_CREDENTIAL_FILE = previous;
+    await rm(directory, { recursive: true, force: true });
   }
 });
