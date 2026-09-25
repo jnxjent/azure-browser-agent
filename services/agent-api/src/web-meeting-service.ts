@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import {
-  WEB_MEETING_BLOCK_END,
   buildWebMeetingBlock,
   describeWebMeetingCompleteness,
   type WebMeetingDetails,
@@ -208,9 +207,7 @@ export function describeWebMeeting(
     ...(record.passcode === undefined ? {} : { passcode: record.passcode }),
     passcodeAvailability: record.passcodeAvailability,
     // The calendar event still has its old time until the explicit update succeeds.
-    ...(scheduleChanged ? {} : {
-      copyText: buildWebMeetingBlock(details).replace(`\n${WEB_MEETING_BLOCK_END}`, ""),
-    }),
+    ...(scheduleChanged ? {} : { copyText: buildWebMeetingBlock(details) }),
     complete: completeness.complete,
     notes: [
       ...(scheduleChanged
