@@ -371,7 +371,7 @@ describe("describeWebMeeting", () => {
     assert.ok(view.notes.some((note) => note.includes("Teams側に残ります")));
   });
 
-  it("flags a rescheduled meeting so the Teams event can still be updated", async () => {
+  it("allows copying existing join details while clearly flagging a schedule mismatch", async () => {
     const store = await requestedStore();
     const { client } = fakeGraph({
       joinUrlOnCreate: JOIN_URL,
@@ -384,16 +384,14 @@ describe("describeWebMeeting", () => {
 
     const moved = { ...SCHEDULE, start: "2026-10-01T13:00:00+09:00", end: "2026-10-01T14:00:00+09:00" };
     const stale = describeWebMeeting(record, moved);
-    // Without this the card shows a complete meeting, hides every action, and the
-    // Teams event silently keeps the old time.
     assert.equal(stale.scheduleChanged, true);
     assert.equal(stale.complete, true);
-    assert.equal(stale.copyText, undefined);
-    assert.ok(stale.notes.some((note) => note.includes("Teams側の予定は以前のまま")));
+    assert.ok(stale.copyText?.includes("参加URL: "));
+    assert.ok(stale.notes.some((note) => note.includes("コピーしてもTeams側の日時は変わりません")));
 
     const renamed = describeWebMeeting(record, { ...SCHEDULE, subject: "別の件名" });
     assert.equal(renamed.scheduleChanged, true);
-    assert.equal(renamed.copyText, undefined);
+    assert.ok(renamed.copyText?.includes("参加URL: "));
   });
 
   it("reports nothing for a conversation that never requested a web meeting", () => {

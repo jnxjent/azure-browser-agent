@@ -206,13 +206,13 @@ export function describeWebMeeting(
     ...(record.meetingId === undefined ? {} : { meetingId: record.meetingId }),
     ...(record.passcode === undefined ? {} : { passcode: record.passcode }),
     passcodeAvailability: record.passcodeAvailability,
-    // The calendar event still has its old time until the explicit update succeeds.
-    ...(scheduleChanged ? {} : { copyText: buildWebMeetingBlock(details) }),
+    // Copying join details does not update the calendar event.
+    copyText: buildWebMeetingBlock(details),
     complete: completeness.complete,
     notes: [
       ...(scheduleChanged
         ? [
-            "日時または件名が変更されています。「Teams会議の日時を更新」を押すまで、Teams側の予定は以前のままです。",
+            "このカードの日時または件名はTeams側の予定と異なります。コピーしてもTeams側の日時は変わりません。",
           ]
         : []),
       ...completeness.notes,

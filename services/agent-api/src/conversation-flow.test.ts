@@ -82,9 +82,12 @@ test("Japanese thread: availability → start only → duration only → final a
   };
   try {
     await send("2099年9月16日に私と髙田部長で打ち合わせ可能な日程を教えて");
-    const numbered = await send("では上記１で。WEB会議も設定して");
+    const numbered = await send("では上記１で。");
     assert.equal(numbered.status, "awaiting_approval", JSON.stringify(numbered));
     assert.equal(numbered.result?.approvalRequest?.facilityId, "アクトミーティングルームC");
+    const added = await send("WEB会議も追加して");
+    assert.equal(added.id, numbered.id, "WEB追加は元のカードをそのまま使う");
+    assert.equal((added as BrowserRun & { webMeetingAdded?: boolean }).webMeetingAdded, true);
     const webMeetingResponse = await fetch(`${base}/${numbered.id}/web-meeting`);
     assert.equal(webMeetingResponse.status, 200);
     const webMeetingView = await webMeetingResponse.json() as { requested: boolean; joinUrl?: string };

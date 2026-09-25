@@ -293,6 +293,18 @@ async function route(
           { userId: validatedInput.userId, threadId: validatedInput.threadId },
           webMeetingRequest === "requested",
         );
+        if (webMeetingRequest === "requested" && isWebMeetingOnlyAddition(validatedInput.prompt)) {
+          const existingCard = Array.from(runs.values()).reverse().find((run) =>
+            run.input.site === "desknets" &&
+            run.input.userId === validatedInput.userId &&
+            run.input.threadId === validatedInput.threadId &&
+            getReopenableBookingProposal(run) !== undefined &&
+            !isRunSuperseded(run, runs.values()));
+          if (existingCard !== undefined) {
+            sendJson(response, 202, { ...existingCard, webMeetingAdded: true });
+            return;
+          }
+        }
       }
     }
     const registeredFacilityPreferences = parseFacilityPreferenceRegistration(
@@ -1135,6 +1147,11 @@ export function getReopenableBookingProposal(run: BrowserRun) {
     return run.result?.manualActionRequest ?? run.result?.approvalRequest;
   }
   return undefined;
+}
+
+function isWebMeetingOnlyAddition(prompt: string): boolean {
+  const normalized = prompt.normalize("NFKC").toLowerCase().trim();
+  return /^(?:(?:あと|追加で|それから|その会議に|この会議に|先ほどの会議に)[、,\s]*)?(?:web|ウェブ|teams|チームズ|オンライン)(?:会議)?(?:も|を)?(?:追加|設定|付け|つけ)(?:して|してください|してほしい|お願い)?[。.!！]*$/.test(normalized);
 }
 
 /** Runs are inserted in conversation order; updating one keeps its position. */
