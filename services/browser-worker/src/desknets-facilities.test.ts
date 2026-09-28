@@ -6,6 +6,11 @@ import {
 } from "./desknets-facilities.js";
 
 describe("DeskNet's meeting-room facility filter", () => {
+  it("keeps only reception rooms when the search explicitly requests one", () => {
+    const rooms = [{ facilityId: "有玉大会議室" }, { facilityId: "有玉本社応接室" },
+      { facilityId: "アクトミーティングルームC" }];
+    assert.deepEqual(keepMeetingRoomFacilities(rooms, "reception_room"), [{ facilityId: "有玉本社応接室" }]);
+  });
   it("keeps meeting rooms, reception rooms, and business-defined CC rooms", () => {
     for (const facilityId of [
       "アクト大会議室",

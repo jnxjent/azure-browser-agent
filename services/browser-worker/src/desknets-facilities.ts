@@ -15,9 +15,12 @@ export function isMeetingRoomFacilityName(value: string): boolean {
 
 export function keepMeetingRoomFacilities<T extends { facilityId: string }>(
   facilities: T[],
+  facilityType?: "meeting_room" | "reception_room" | "any",
 ): T[] {
   return facilities.filter((facility) =>
-    isMeetingRoomFacilityName(facility.facilityId),
+    isMeetingRoomFacilityName(facility.facilityId) &&
+    (facilityType === "reception_room" ? facility.facilityId.normalize("NFKC").includes("応接室") :
+      facilityType === "meeting_room" ? !facility.facilityId.normalize("NFKC").includes("応接室") : true),
   );
 }
 

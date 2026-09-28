@@ -223,6 +223,14 @@ test("an organization reply resumes an open-ended search before intent analysis"
   };
   let workerCalls = 0;
   DeskNetsBrowserWorker.prototype.execute = async (run: BrowserRun) => {
+    if (run.task?.type === "book_meeting") {
+      return { ...run, status: "awaiting_approval", result: {
+        summary: "Prepared", evidence: [], approvalRequest: {
+          title: run.task.title, start: run.task.selectedStart!, end: run.task.selectedEnd!,
+          facilityId: run.task.facilityQuery!, participantIds: ["鈴木"], emailNotificationWillBeSent: true,
+        },
+      } };
+    }
     assert.equal(run.task?.type, "find_availability");
     if (run.task?.type !== "find_availability") throw new Error("Unexpected task");
     workerCalls += 1;
@@ -234,7 +242,14 @@ test("an organization reply resumes an open-ended search before intent analysis"
           organizations: ["営業部", "総務部"] },
       } };
     }
-    return { ...run, status: "completed", result: { summary: "Search resumed", evidence: [] } };
+    const availability = [{ start: "2099-10-05T01:00:00.000Z", end: "2099-10-05T03:00:00.000Z",
+      durationMinutes: 120, participantIds: ["鈴木"], availableFacilityIds: ["有玉本社応接室"] }];
+    return { ...run, status: "completed", result: { summary: "Search resumed", evidence: [], availability,
+      pendingBooking: { ...run.task, participantIds: ["鈴木"], availability, userOrganization: "経営企画部",
+        allFacilityAvailability: availability.map(slot => ({ ...slot,
+          availableFacilityIds: ["アクトミーティングルームC", "有玉大会議室", "有玉本社応接室"] })),
+      },
+    } };
   };
 
   server.listen(0, "127.0.0.1");
@@ -262,6 +277,12 @@ test("an organization reply resumes an open-ended search before intent analysis"
     if (resumed.task?.type !== "find_availability") throw new Error("Unexpected resumed task");
     assert.equal(resumed.task.autoExtendSearch, true);
     assert.equal(resumed.task.participants[0]?.organization, "営業部");
+    assert.equal(resumed.task.facilityQuery, "有玉");
+    assert.equal(resumed.task.facilityType, "reception_room");
+    const card = await send("では1で");
+    assert.equal(card.status, "awaiting_approval", JSON.stringify(card));
+    assert.equal(card.result?.approvalRequest?.facilityId, "有玉本社応接室",
+      "the explicit reception room overrides the department's Act preference and other Aritama rooms");
     assert.equal(workerCalls, 2);
     assert.equal(modelCalls, 1, "organization replies must not be reinterpreted by the model");
   } finally {

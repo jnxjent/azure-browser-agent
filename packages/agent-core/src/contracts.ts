@@ -54,6 +54,7 @@ export interface ParticipantSelector {
 }
 
 export interface FindAvailabilityTask {
+  facilityType?: "meeting_room" | "reception_room" | "any";
   type: "find_availability";
   participants: ParticipantSelector[];
   date: string;
@@ -68,6 +69,7 @@ export interface FindAvailabilityTask {
 }
 
 export interface BookMeetingTask {
+  facilityType?: "meeting_room" | "reception_room" | "any";
   /** Recheck rooms for the saved meeting; never submit the final registration. */
   facilityOnlyChange?: boolean;
   previousFacilityId?: string;
@@ -143,6 +145,7 @@ export interface PendingParticipantChoice {
 }
 
 export interface PendingBookingContext {
+  facilityType?: "meeting_room" | "reception_room" | "any";
   selectionMode?: "earliest";
   autoExtendSearch?: boolean;
   originalAvailability?: BookableAvailabilitySlot[];

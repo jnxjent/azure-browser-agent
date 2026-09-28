@@ -438,11 +438,11 @@ async function executeAvailabilityRun(
     );
     const filteredAvailability = filterFutureAvailability(findBookableAvailability({
       ...availabilityRequest,
-      facilities: facilitySchedules,
+      facilities: keepMeetingRoomFacilities(facilitySchedules, task.facilityType),
     }));
     availability.push(...filteredAvailability);
     const { facilityQuery: _facilityQuery, ...companyWideRequest } = availabilityRequest;
-    allFacilityAvailability.push(...(task.facilityQuery === undefined
+    allFacilityAvailability.push(...(task.facilityQuery === undefined && task.facilityType === undefined
       ? filteredAvailability
       : filterFutureAvailability(findBookableAvailability({
       ...companyWideRequest,
@@ -465,6 +465,7 @@ async function executeAvailabilityRun(
     endDate: task.endDate,
     durationMinutes: task.durationMinutes,
     participants: task.participants,
+    ...(task.facilityType === undefined ? {} : { facilityType: task.facilityType }),
     ...(task.facilityQuery === undefined ? {} : { facilityQuery: task.facilityQuery }),
     ...(task.title === undefined ? {} : { title: task.title }),
     participantIds,

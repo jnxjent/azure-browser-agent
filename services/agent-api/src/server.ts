@@ -496,6 +496,7 @@ async function route(
         intentSource:"deterministic",
         task:{type:"find_availability",participants:context.participants ?? [],date:today,endDate,
           durationMinutes:context.durationMinutes,selectionMode:context.selectionMode ?? "earliest",autoExtendSearch:context.autoExtendSearch ?? false,
+          ...(context.facilityType === undefined ? {} : {facilityType:context.facilityType}),
           ...(context.facilityQuery === undefined ? {} : {facilityQuery:context.facilityQuery})},
       };
       runs.set(refreshed.id, refreshed);
@@ -809,12 +810,16 @@ async function route(
           });
       let task = analysis.task;
       if ("facilityQuery" in task && task.facilityQuery !== undefined) {
-        const facilityQuery = parseFlexibleFacilityQuery(task.facilityQuery)?.query ?? task.facilityQuery;
+        const parsedFacility = parseFlexibleFacilityQuery(task.facilityQuery);
+        const facilityQuery = parsedFacility?.query ?? task.facilityQuery;
         if (isWebMeetingFacilityQuery(facilityQuery) && task.type === "book_meeting") {
           const { facilityQuery: _webMeetingLabel, ...withoutFacility } = task;
           task = withoutFacility as typeof task;
         } else {
-          task = { ...task, facilityQuery };
+          task = { ...task, facilityQuery,
+            ...((task.type === "find_availability" || task.type === "book_meeting") && parsedFacility?.facilityType !== undefined
+              ? { facilityType: parsedFacility.facilityType } : {}),
+          };
         }
       }
       run = { ...run, intentSource: analysis.source };
@@ -958,6 +963,19 @@ async function route(
             "先に同じ会話で参加者の空き時間を確認してください。",
           );
         }
+        // Selecting a time does not replace the room constraint from the search.
+        if (task.facilityQuery === undefined) {
+          const inheritedQuery = conversation.facilityId ?? conversation.context.facilityQuery;
+          task = { ...task,
+            ...(inheritedQuery === undefined ? {} : { facilityQuery: inheritedQuery }),
+            ...(conversation.facilityId !== undefined || conversation.context.facilityType === undefined
+              ? {} : { facilityType: conversation.context.facilityType }),
+          };
+        }
+        if (task.facilityType === undefined && task.facilityQuery === conversation.context.facilityQuery &&
+            conversation.context.facilityType !== undefined) {
+          task = { ...task, facilityType: conversation.context.facilityType };
+        }
         if (task.selectedStart === undefined || task.selectedEnd === undefined) {
           throw new TypeError(
             "直接予約する場合は、候補内の日付と開始・終了時刻を指定してください。",
@@ -969,8 +987,9 @@ async function route(
         const bookingAvailability = getCompanyWideAvailability(conversation.context).map((candidate) => ({
           ...candidate, availableFacilityIds: candidate.availableFacilityIds.filter((id) => !excluded.includes(id)),
         }));
+        const { selectedStart, selectedEnd } = task;
         const slot = bookingAvailability.find(
-          (candidate) => candidate.start === task.selectedStart && candidate.end === task.selectedEnd,
+          (candidate) => candidate.start === selectedStart && candidate.end === selectedEnd,
         );
         if (slot === undefined || slot.availableFacilityIds.length === 0) {
           throw new TypeError(
@@ -981,9 +1000,10 @@ async function route(
         let facilityId: string;
         try {
           const savedPreferences = await facilityPreferenceStore.get(validatedInput.userId);
+          const eligibleSlot = restrictSlotToFacilityType(slot, task.facilityType);
           facilityId = task.facilityQuery === undefined
             ? resolveEarliestPreferredFacility(
-                [slot],
+                [eligibleSlot],
                 conversation.context.userOrganization,
                 conversation.context.userDisplayName,
                 FACILITY_PREFERENCE_OVERRIDE_BY_USER,
@@ -994,7 +1014,7 @@ async function route(
               })()
             : resolveAutomaticFacilityForSlot(
                 task.facilityQuery,
-                slot,
+                eligibleSlot,
                 conversation.context.userOrganization,
                 conversation.context.userDisplayName,
               );
@@ -2093,6 +2113,11 @@ export function inheritAvailabilityPreferences(
   if (!previous) return task;
   return {
     ...task,
+    ...(task.facilityQuery === undefined && previous.facilityQuery !== undefined
+      ? { facilityQuery: previous.facilityQuery } : {}),
+    ...(task.facilityType === undefined && previous.facilityType !== undefined &&
+      (task.facilityQuery === undefined || task.facilityQuery === previous.facilityQuery)
+      ? { facilityType: previous.facilityType } : {}),
     ...(previous.selectionMode === "earliest" && readDurationMinutes(prompt) !== undefined
       ? { selectionMode: "earliest" as const } : {}),
     participants: task.participants.map(participant => {
