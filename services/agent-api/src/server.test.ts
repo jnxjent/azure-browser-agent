@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { BookableAvailabilitySlot } from "@azure-browser-agent/agent-core";
+import type { BookableAvailabilitySlot, FindAvailabilityTask } from "@azure-browser-agent/agent-core";
 import { createRun } from "@azure-browser-agent/agent-core";
 import {
   buildShowCandidatesResponse,
+  configureAvailabilitySearch,
   isAvailabilityRefreshRequest,
   hasExplicitSearchPeriod,
   getReopenableBookingProposal,
@@ -39,6 +40,29 @@ import {
 } from "./server.js";
 
 const START = "2026-08-24T00:30:00.000Z";
+
+it("extends an open-ended start until several candidates are found", () => {
+  const task: FindAvailabilityTask = {
+    type: "find_availability",
+    participants: [{ name: "鈴木" }],
+    date: "2026-10-05",
+    endDate: "2026-10-11",
+    durationMinutes: 120,
+    facilityQuery: "有玉の応接室",
+  };
+
+  const openEnded = configureAvailabilitySearch(task, "10月5日以降で打ち合わせを設定したいです。候補日を出してください。");
+  assert.equal(openEnded.autoExtendSearch, true);
+  assert.equal(openEnded.selectionMode, undefined);
+  assert.equal(configureAvailabilitySearch(task, "10/5以降で候補を出して").autoExtendSearch, true);
+  assert.equal(configureAvailabilitySearch(task, "10月5日から10月11日までで候補を出して").autoExtendSearch, false);
+  assert.equal(configureAvailabilitySearch(task, "10月5日以降、10月20日までで候補を出して").autoExtendSearch, false);
+
+  const earliest = configureAvailabilitySearch(task, "最短で打ち合わせできる日程を出して");
+  assert.equal(earliest.autoExtendSearch, true);
+  assert.equal(earliest.selectionMode, "earliest");
+  assert.equal(configureAvailabilitySearch(task, "10月5日の最短候補を出して").autoExtendSearch, false);
+});
 
 it("selects a numbered candidate with a WEB request without treating WEB as a room", () => {
   assert.equal(readNumberedCandidateSelection("では上記１で。WEB会議も設定して"), 1);

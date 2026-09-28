@@ -843,9 +843,7 @@ async function route(
       if (task.type === "find_availability") {
         task = inheritAvailabilityPreferences(task, conversation?.context, validatedInput.prompt);
         pendingParticipantChoices.delete(conversationKey(validatedInput));
-        if (isEarliestMeetingRequest(validatedInput.prompt)) {
-          task = { ...task, selectionMode: "earliest", autoExtendSearch: !hasExplicitSearchPeriod(validatedInput.prompt) };
-        }
+        task = configureAvailabilitySearch(task, validatedInput.prompt);
         const today = currentJapanDate();
         if (task.endDate < today) {
           throw new TypeError(
@@ -2488,6 +2486,18 @@ export function isAvailabilityRefreshRequest(prompt: string): boolean {
 
 export function hasExplicitSearchPeriod(prompt: string): boolean {
   return /(?:今日|明日|明後日|今週|来週|再来週|今月|来月|\d+\s*(?:月|日|週間|日間)|\d{1,4}[-/]\d{1,2}|月曜|火曜|水曜|木曜|金曜|土曜|日曜)/.test(prompt.normalize("NFKC"));
+}
+
+export function configureAvailabilitySearch(task: FindAvailabilityTask, prompt: string): FindAvailabilityTask {
+  const text = prompt.normalize("NFKC").replace(/\s+/g, "");
+  const openEndedStart = /(?:\d{1,2}月\d{1,2}日|\d{1,2}[\/.-]\d{1,2})以降/.test(text) &&
+    !/(?:まで|迄|以内|今月中)/.test(text);
+  const earliest = isEarliestMeetingRequest(prompt);
+  return {
+    ...task,
+    ...(earliest ? { selectionMode: "earliest" as const } : {}),
+    autoExtendSearch: openEndedStart || (earliest && !hasExplicitSearchPeriod(prompt)),
+  };
 }
 
 export function isParticipantChoiceCancellationRequest(prompt: string): boolean {

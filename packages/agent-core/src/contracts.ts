@@ -63,7 +63,7 @@ export interface FindAvailabilityTask {
   title?: string;
   /** Offer up to five chronological choices, marking the first as earliest. */
   selectionMode?: "earliest";
-  /** Search ahead for several choices only when the user did not specify a period. */
+  /** Search ahead for several choices when there is no end date. */
   autoExtendSearch?: boolean;
 }
 
