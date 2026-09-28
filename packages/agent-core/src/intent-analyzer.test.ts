@@ -49,6 +49,37 @@ describe("analyzeDeskNetsIntent", () => {
     assert.equal((requestBody?.response_format as { type?: string }).type, "json_schema");
   });
 
+  it("searches seven days from an open-ended start when the model omits dateEnd", async () => {
+    const fetchImplementation: typeof fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+        intent: "find_availability",
+        participants: [{ name: "山田", organization: null }],
+        dateStart: "2026-10-05",
+        dateEnd: null,
+        durationMinutes: 120,
+        facilityQuery: "有玉の応接室",
+        candidateNumber: null,
+        sendEmail: null,
+        title: null,
+        selectedStart: null,
+        selectedEnd: null,
+      }) } }] }), { status: 200 });
+    const result = await analyzeDeskNetsIntent(
+      "10月5日以降で山田さんとの120分の打ち合わせ。会場は有玉の応接室。候補日を出してください。",
+      new Date("2026-09-28T12:00:00+09:00"),
+      { config, requireLlm: true, fetchImplementation },
+    );
+    assert.equal(result.failureKind, undefined);
+    assert.deepEqual(result.task, {
+      type: "find_availability",
+      participants: [{ name: "山田" }],
+      date: "2026-10-05",
+      endDate: "2026-10-11",
+      durationMinutes: 120,
+      facilityQuery: "有玉の応接室",
+    });
+  });
+
   it("carries a structured participant organization through to the task", async () => {
     const fetchImplementation: typeof fetch = async () =>
       new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({

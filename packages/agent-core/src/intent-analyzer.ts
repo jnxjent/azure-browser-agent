@@ -61,7 +61,7 @@ export async function analyzeDeskNetsIntent(
       options.fetchImplementation ?? fetch,
       options,
     );
-    return { task: validateStructuredIntent(structured), source: "azure_openai" };
+    return { task: validateStructuredIntent(structured, prompt), source: "azure_openai" };
   } catch (error) {
     const failureKind = error instanceof Error ? error.name : "UnknownError";
     if (options.requireLlm) {
@@ -114,6 +114,7 @@ async function requestStructuredIntent(
             `Current instant: ${now.toISOString()}. Calendar timezone: Asia/Tokyo.`,
             "Resolve 今日, 明日, N週間以内, 今週, 来週, 今月中, and explicit ranges to inclusive YYYY-MM-DD dates.",
             "If an availability request omits a date, use today through six calendar days later.",
+            "For an open-ended start such as 10月5日以降, set dateEnd to six calendar days after dateStart. Do not leave dateEnd null.",
             "今週 means today through this week's Friday (never Saturday or Sunday); if today is itself Saturday or Sunday, use just today as both dateStart and dateEnd.",
             "For N週間以内, start today and include N*7 calendar days including today.",
             "Use change_availability_duration when a follow-up only changes the meeting length.",
@@ -144,12 +145,16 @@ async function requestStructuredIntent(
   return JSON.parse(readCompletionContent(body)) as StructuredIntent;
 }
 
-function validateStructuredIntent(value: StructuredIntent): DeskNetsTask {
+function validateStructuredIntent(value: StructuredIntent, prompt: string): DeskNetsTask {
   if (value.intent === "clarify") return { type: "clarify", question: readText(value.question ?? null, "question") };
   if (value.intent === "find_availability") {
     if (value.participants.length === 0) throw new TypeError("LLM intent omitted participants.");
     const date = readIsoDate(value.dateStart, "dateStart");
-    const endDate = readIsoDate(value.dateEnd, "dateEnd");
+    // A model can leave an open-ended "X日以降" request without dateEnd.
+    // Apply the same seven-day window used when the request omits a date.
+    const endDate = value.dateEnd === null && /以降/.test(prompt) && !/(?:まで|以内)/.test(prompt)
+      ? addCalendarDays(date, 6)
+      : readIsoDate(value.dateEnd, "dateEnd");
     if (endDate < date) throw new TypeError("LLM intent returned an invalid date range.");
     const title = value.title === null ? undefined : readText(value.title, "title");
     const participants = value.participants.filter((participant) => !/^(?:私|わたし|自分|本人|僕|ぼく|俺|わたくし)$/i.test(participant.name.trim())).map((participant) => {
@@ -235,6 +240,12 @@ function readIsoDate(value: string | null, label: string): string {
     throw new TypeError(`LLM intent returned invalid ${label}.`);
   }
   return value;
+}
+
+function addCalendarDays(date: string, days: number): string {
+  const result = new Date(`${date}T00:00:00Z`);
+  result.setUTCDate(result.getUTCDate() + days);
+  return result.toISOString().slice(0, 10);
 }
 
 function readText(value: string | null, label: string): string {
