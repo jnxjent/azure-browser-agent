@@ -513,6 +513,32 @@ async function route(
       sendJson(response, 202, changed);
       return;
     }
+    // Resolve an outstanding organization question before intent analysis can
+    // reinterpret a short reply as a new one-day availability request.
+    const awaitingParticipantChoice = pendingParticipantChoices.get(conversationKey(validatedInput));
+    if (validatedInput.site === "desknets" && awaitingParticipantChoice !== undefined) {
+      if (isFreshAvailabilityRequest(validatedInput.prompt)) {
+        pendingParticipantChoices.delete(conversationKey(validatedInput));
+      } else if (isParticipantChoiceCancellationRequest(validatedInput.prompt)) {
+        pendingParticipantChoices.delete(conversationKey(validatedInput));
+        const cancelledChoice: BrowserRun = {
+          ...createRun({ ...validatedInput, mode: "read" }),
+          status: "completed",
+          updatedAt: new Date().toISOString(),
+          result: {
+            summary: "Cancelled the pending participant organization choice.",
+            assistantMessage: "参加者の組織選択をキャンセルしました。",
+            evidence: [],
+          },
+        };
+        runs.set(cancelledChoice.id, cancelledChoice);
+        sendJson(response, 202, cancelledChoice);
+        return;
+      } else {
+        handleParticipantChoiceReply(createRun(validatedInput), validatedInput, awaitingParticipantChoice, response);
+        return;
+      }
+    }
     const selectedCandidate = readNumberedCandidateSelection(validatedInput.prompt);
     let semanticAnalysis = savedConversation?.candidates !== undefined && selectedCandidate !== undefined
       ? { source: "deterministic" as const, task: { type: "select_booking_candidate" as const, candidateNumber: selectedCandidate } }
@@ -718,34 +744,6 @@ async function route(
         );
         return;
       }
-      const awaitingParticipantChoice = pendingParticipantChoices.get(conversationKey(validatedInput));
-      if (awaitingParticipantChoice !== undefined && semanticAnalysis === undefined) {
-        if (isFreshAvailabilityRequest(validatedInput.prompt)) {
-          // A complete new availability request supersedes the unresolved
-          // organization question. Drop only that question and let the new
-          // prompt continue through the normal intent-analysis path below.
-          pendingParticipantChoices.delete(conversationKey(validatedInput));
-        } else if (isParticipantChoiceCancellationRequest(validatedInput.prompt)) {
-          pendingParticipantChoices.delete(conversationKey(validatedInput));
-          const cancelledChoice: BrowserRun = {
-            ...run,
-            input: { ...validatedInput, mode: "read" },
-            status: "completed",
-            updatedAt: new Date().toISOString(),
-            result: {
-              summary: "Cancelled the pending participant organization choice.",
-              assistantMessage: "参加者の組織選択をキャンセルしました。",
-              evidence: [],
-            },
-          };
-          runs.set(cancelledChoice.id, cancelledChoice);
-          sendJson(response, 202, cancelledChoice);
-          return;
-        } else {
-          handleParticipantChoiceReply(run, validatedInput, awaitingParticipantChoice, response);
-          return;
-        }
-      }
       let conversation = pendingBookings.get(conversationKey(validatedInput));
       const semanticTask = semanticAnalysis?.task;
       const semanticDuration = semanticTask?.type === "book_meeting" && semanticTask.selectedStart && semanticTask.selectedEnd
@@ -843,7 +841,7 @@ async function route(
       if (task.type === "find_availability") {
         task = inheritAvailabilityPreferences(task, conversation?.context, validatedInput.prompt);
         pendingParticipantChoices.delete(conversationKey(validatedInput));
-        task = configureAvailabilitySearch(task, validatedInput.prompt);
+        task = configureAvailabilitySearch(task, validatedInput.prompt, conversation?.context);
         const today = currentJapanDate();
         if (task.endDate < today) {
           throw new TypeError(
@@ -2488,7 +2486,11 @@ export function hasExplicitSearchPeriod(prompt: string): boolean {
   return /(?:今日|明日|明後日|今週|来週|再来週|今月|来月|\d+\s*(?:月|日|週間|日間)|\d{1,4}[-/]\d{1,2}|月曜|火曜|水曜|木曜|金曜|土曜|日曜)/.test(prompt.normalize("NFKC"));
 }
 
-export function configureAvailabilitySearch(task: FindAvailabilityTask, prompt: string): FindAvailabilityTask {
+export function configureAvailabilitySearch(
+  task: FindAvailabilityTask,
+  prompt: string,
+  previous?: PendingBookingContext,
+): FindAvailabilityTask {
   const text = prompt.normalize("NFKC").replace(/\s+/g, "");
   const openEndedStart = /(?:\d{1,2}月\d{1,2}日|\d{1,2}[\/.-]\d{1,2})以降/.test(text) &&
     !/(?:まで|迄|以内|今月中)/.test(text);
@@ -2496,7 +2498,8 @@ export function configureAvailabilitySearch(task: FindAvailabilityTask, prompt: 
   return {
     ...task,
     ...(earliest ? { selectionMode: "earliest" as const } : {}),
-    autoExtendSearch: openEndedStart || (earliest && !hasExplicitSearchPeriod(prompt)),
+    autoExtendSearch: openEndedStart || (!hasExplicitSearchPeriod(prompt) &&
+      (earliest || task.autoExtendSearch === true || previous?.autoExtendSearch === true)),
   };
 }
 

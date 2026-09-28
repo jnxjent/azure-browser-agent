@@ -192,3 +192,91 @@ test("Japanese thread: availability → start only → duration only → final a
     await rm(meetingDirectory, { recursive: true, force: true });
   }
 });
+
+test("an organization reply resumes an open-ended search before intent analysis", async () => {
+  const { server } = await import("./server.js");
+  const originalExecute = DeskNetsBrowserWorker.prototype.execute;
+  const originalFetch = globalThis.fetch;
+  const savedEnvironment = {
+    endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+    key: process.env.AZURE_OPENAI_API_KEY,
+    deployment: process.env.AZURE_OPENAI_DEPLOYMENT,
+    apiKey: process.env.AGENT_API_KEY,
+    multiUser: process.env.DESKNETS_MULTI_USER_ENABLED,
+  };
+  process.env.AZURE_OPENAI_ENDPOINT = "https://participant-choice-test.example";
+  process.env.AZURE_OPENAI_API_KEY = "test-key";
+  process.env.AZURE_OPENAI_DEPLOYMENT = "test-model";
+  delete process.env.AGENT_API_KEY;
+  delete process.env.DESKNETS_MULTI_USER_ENABLED;
+
+  let modelCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    if (!String(input).startsWith("https://participant-choice-test.example")) return originalFetch(input, init);
+    modelCalls += 1;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      intent: "find_availability", participants: [{ name: "鈴木", organization: null }],
+      dateStart: "2099-10-05", dateEnd: "2099-10-05", durationMinutes: 120,
+      facilityQuery: "有玉の応接室", candidateNumber: null, sendEmail: null, title: null,
+      selectedStart: null, selectedEnd: null,
+    }) } }] }), { status: 200 });
+  };
+  let workerCalls = 0;
+  DeskNetsBrowserWorker.prototype.execute = async (run: BrowserRun) => {
+    assert.equal(run.task?.type, "find_availability");
+    if (run.task?.type !== "find_availability") throw new Error("Unexpected task");
+    workerCalls += 1;
+    if (workerCalls === 1) {
+      assert.equal(run.task.autoExtendSearch, true);
+      return { ...run, status: "awaiting_user_input", result: {
+        summary: "Ambiguous participant", evidence: [],
+        participantChoice: { task: run.task, participantIndex: 0, ambiguousName: "鈴木",
+          organizations: ["営業部", "総務部"] },
+      } };
+    }
+    return { ...run, status: "completed", result: { summary: "Search resumed", evidence: [] } };
+  };
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}/browser-agent/runs`;
+  const send = async (prompt: string): Promise<BrowserRun> => {
+    const response = await fetch(base, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: "open-ended-choice", threadId: "open-ended-choice", site: "desknets", mode: "read", prompt }) });
+    let run = await response.json() as BrowserRun;
+    assert.equal(response.status, 202, JSON.stringify(run));
+    for (let attempt = 0; ["queued", "running"].includes(run.status) && attempt < 100; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      run = await (await fetch(`${base}/${run.id}`)).json() as BrowserRun;
+    }
+    return run;
+  };
+  try {
+    const ambiguous = await send("2099年10月5日以降で鈴木さんとの120分の打ち合わせ候補を出して");
+    assert.equal(ambiguous.status, "awaiting_user_input");
+    const resumed = await send("営業部です");
+    assert.equal(resumed.status, "completed", JSON.stringify(resumed));
+    assert.equal(resumed.task?.type, "find_availability");
+    if (resumed.task?.type !== "find_availability") throw new Error("Unexpected resumed task");
+    assert.equal(resumed.task.autoExtendSearch, true);
+    assert.equal(resumed.task.participants[0]?.organization, "営業部");
+    assert.equal(workerCalls, 2);
+    assert.equal(modelCalls, 1, "organization replies must not be reinterpreted by the model");
+  } finally {
+    DeskNetsBrowserWorker.prototype.execute = originalExecute;
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries({
+      AZURE_OPENAI_ENDPOINT: savedEnvironment.endpoint,
+      AZURE_OPENAI_API_KEY: savedEnvironment.key,
+      AZURE_OPENAI_DEPLOYMENT: savedEnvironment.deployment,
+      AGENT_API_KEY: savedEnvironment.apiKey,
+      DESKNETS_MULTI_USER_ENABLED: savedEnvironment.multiUser,
+    })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

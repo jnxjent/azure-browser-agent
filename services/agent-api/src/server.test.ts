@@ -57,6 +57,10 @@ it("extends an open-ended start until several candidates are found", () => {
   assert.equal(configureAvailabilitySearch(task, "10/5以降で候補を出して").autoExtendSearch, true);
   assert.equal(configureAvailabilitySearch(task, "10月5日から10月11日までで候補を出して").autoExtendSearch, false);
   assert.equal(configureAvailabilitySearch(task, "10月5日以降、10月20日までで候補を出して").autoExtendSearch, false);
+  const savedOpenEnded = { date: task.date, endDate: task.endDate, durationMinutes: 120,
+    participantIds: [], availability: [], autoExtendSearch: true };
+  assert.equal(configureAvailabilitySearch(task, "時間を120分にして", savedOpenEnded).autoExtendSearch, true);
+  assert.equal(configureAvailabilitySearch(task, "10月5日だけで候補を出して", savedOpenEnded).autoExtendSearch, false);
 
   const earliest = configureAvailabilitySearch(task, "最短で打ち合わせできる日程を出して");
   assert.equal(earliest.autoExtendSearch, true);
