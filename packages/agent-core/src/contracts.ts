@@ -244,6 +244,7 @@ export interface BrowserRun {
     assistantMessage?: string;
     evidence: string[];
     availability?: Array<CommonAvailabilitySlot | BookableAvailabilitySlot>;
+    multiLocationCandidateLines?: string[];
     pendingBooking?: PendingBookingContext;
     participantChoice?: PendingParticipantChoice;
     meetingProposal?: MeetingProposal;

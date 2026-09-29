@@ -587,8 +587,8 @@ async function executeAvailabilityRun(
       candidates.push(slot);
       perDate.set(date, (perDate.get(date) ?? 0) + 1);
     }
-    const lines = candidates.map((slot) =>
-      `・${formatJapanDateTime(slot.start)}〜${formatJapanTime(slot.end)}　${task.requiredFacilityLocations!.map((location) =>
+    const lines = candidates.map((slot, index) =>
+      `${index + 1}. ${formatJapanDateTime(slot.start)}〜${formatJapanTime(slot.end)}　${task.requiredFacilityLocations!.map((location) =>
         `${location}: ${slot.facilitiesByLocation[location]?.[0] ?? "未確認"}`).join("／")}`,
     );
     return {
@@ -597,9 +597,10 @@ async function executeAvailabilityRun(
         summary: `Verified simultaneous participant and meeting-room availability at ${task.requiredFacilityLocations.join(" and ")}.`,
         assistantMessage: candidates.length === 0
           ? `${task.date}〜${task.endDate}に、参加者全員と${task.requiredFacilityLocations.join("・")}の会議室が同時に${task.durationMinutes}分空いている候補はありませんでした。`
-          : `${task.date}〜${task.endDate}に、参加者全員と各拠点の会議室が同時に${task.durationMinutes}分空いている候補です。\n${lines.join("\n")}\n空き状況は変わるため、予約前に再確認してください。会議室の予約やWEB会議の作成は行っていません。`,
+          : `${task.date}〜${task.endDate}に、参加者全員と各拠点の会議室が同時に${task.durationMinutes}分空いている候補です。\n${lines.join("\n")}\n「候補1で」のように番号を指定するか、候補の行を貼り返してください。空き状況は変わるため、予約前に再確認してください。会議室の予約やWEB会議の作成は行っていません。`,
         evidence: [observationBefore.screenshotRef, observationAfter.screenshotRef],
         availability: candidates,
+        multiLocationCandidateLines: lines,
       },
     };
   }

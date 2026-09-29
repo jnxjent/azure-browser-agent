@@ -19,6 +19,7 @@ import {
   type CreateRunInput,
   type DeskNetsTask,
   type FindAvailabilityTask,
+  type MultiLocationAvailabilitySlot,
   type PendingBookingContext,
   type PendingParticipantChoice,
 } from "@azure-browser-agent/agent-core";
@@ -90,6 +91,11 @@ export interface PendingBookingConversation {
 }
 
 const pendingBookings = new Map<string, PendingBookingConversation>();
+interface PendingMultiLocationCandidates {
+  candidates: MultiLocationAvailabilitySlot[];
+  lines: string[];
+}
+const pendingMultiLocationCandidates = new Map<string, PendingMultiLocationCandidates>();
 // Separate from pendingBookings because this state exists BEFORE any search
 // has actually succeeded (there's no PendingBookingContext yet to attach it
 // to — no availability, no participantIds).
@@ -167,6 +173,22 @@ export function readNumberedCandidateSelection(prompt: string): number | undefin
   }
   const candidateNumber = Number(match[1]);
   return Number.isSafeInteger(candidateNumber) && candidateNumber > 0 ? candidateNumber : undefined;
+}
+
+export function readMultiLocationCandidateSelection(
+  prompt: string,
+  lines: string[],
+): number | undefined {
+  const normalized = prompt.normalize("NFKC").trim();
+  const numbered = readNumberedCandidateSelection(normalized) ??
+    (/^\d{1,2}$/.test(normalized) ? Number(normalized) : undefined);
+  if (numbered !== undefined) return numbered;
+  const compact = normalized.replace(/\s+/g, "");
+  for (const [index, line] of lines.entries()) {
+    const candidate = line.normalize("NFKC").replace(/^\d+[.)]\s*/, "").replace(/\s+/g, "");
+    if (candidate.length > 0 && compact.includes(candidate)) return index + 1;
+  }
+  return undefined;
 }
 
 /** Model hints such as "WEB会議" describe the meeting medium, not a DeskNet's room. */
@@ -557,6 +579,33 @@ async function route(
         return;
       }
     }
+    const multiLocationCandidates = pendingMultiLocationCandidates.get(conversationKey(validatedInput));
+    const multiLocationSelection = multiLocationCandidates === undefined
+      ? undefined
+      : readMultiLocationCandidateSelection(validatedInput.prompt, multiLocationCandidates.lines);
+    if (validatedInput.site === "desknets" && multiLocationCandidates !== undefined && multiLocationSelection !== undefined) {
+      const slot = multiLocationCandidates.candidates[multiLocationSelection - 1];
+      if (slot === undefined) throw new TypeError("有効な候補番号を指定してください。");
+      assertSlotHasNotStarted(slot);
+      const selected = createRun({ ...validatedInput, mode: "read" });
+      const roomLines = Object.entries(slot.facilitiesByLocation).map(
+        ([location, rooms]) => `${location}: ${rooms[0] ?? "未確認"}`,
+      );
+      const completed: BrowserRun = {
+        ...selected,
+        status: "completed",
+        updatedAt: new Date().toISOString(),
+        result: {
+          summary: `Selected multi-location candidate ${multiLocationSelection}.`,
+          assistantMessage: `候補${multiLocationSelection}を選択しました。\n${multiLocationCandidates.lines[multiLocationSelection - 1]}\n対象会議室: ${roomLines.join("／")}。\nこれは空き状況の確認結果です。2室の予約とWEB会議の作成はまだ行っていません。2室はそれぞれDeskNet'sで予約してください。`,
+          evidence: [`Candidate ${multiLocationSelection}: ${slot.start} to ${slot.end}`],
+          availability: [slot],
+        },
+      };
+      runs.set(completed.id, completed);
+      sendJson(response, 202, completed);
+      return;
+    }
     const selectedCandidate = readNumberedCandidateSelection(validatedInput.prompt);
     let semanticAnalysis = savedConversation?.candidates !== undefined && selectedCandidate !== undefined
       ? { source: "deterministic" as const, task: { type: "select_booking_candidate" as const, candidateNumber: selectedCandidate } }
@@ -861,6 +910,7 @@ async function route(
         };
       }
       if (task.type === "find_availability") {
+        pendingMultiLocationCandidates.delete(conversationKey(validatedInput));
         task = inheritAvailabilityPreferences(task, conversation?.context, validatedInput.prompt);
         const requiredFacilityLocations = readRequiredFacilityLocations(validatedInput.prompt);
         if (requiredFacilityLocations !== undefined) {
@@ -1636,6 +1686,14 @@ async function executeRun(runId: string): Promise<void> {
       completed = buildEarliestCandidatesRun(completed);
     }
     runs.set(runId, completed);
+    if (completed.task?.type === "find_availability" &&
+        completed.task.requiredFacilityLocations !== undefined &&
+        completed.result?.multiLocationCandidateLines !== undefined) {
+      pendingMultiLocationCandidates.set(conversationKey(completed.input), {
+        candidates: (completed.result.availability ?? []) as MultiLocationAvailabilitySlot[],
+        lines: completed.result.multiLocationCandidateLines,
+      });
+    }
     const pending = completed.result?.pendingBooking ?? completed.context;
     if (pending !== undefined) {
       const proposal = completed.result?.approvalRequest ??

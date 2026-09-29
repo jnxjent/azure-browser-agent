@@ -11,6 +11,7 @@ import {
   isRunSuperseded,
   isWebMeetingFacilityQuery,
   readNumberedCandidateSelection,
+  readMultiLocationCandidateSelection,
   buildEarliestCandidatesRun,
   isEarliestMeetingRequest,
   inheritAvailabilityPreferences,
@@ -77,6 +78,17 @@ it("selects a numbered candidate with a WEB request without treating WEB as a ro
   assert.equal(isWebMeetingFacilityQuery("WEB会議"), true);
   assert.equal(isWebMeetingFacilityQuery("Teams会議"), true);
   assert.equal(isWebMeetingFacilityQuery("有玉大会議室"), false);
+});
+
+it("selects a two-location candidate by number or a copied candidate line", () => {
+  const lines = [
+    "1. 10/15 09:30〜10:30　アクト: アクト大会議室／有玉: 有玉大会議室 ＡＥＲ～アリア～",
+    "2. 10/16 14:00〜15:00　アクト: アクト大会議室／有玉: 有玉大会議室 ＡＥＲ～アリア～",
+  ];
+  assert.equal(readMultiLocationCandidateSelection("1", lines), 1);
+  assert.equal(readMultiLocationCandidateSelection("では、2で", lines), 2);
+  assert.equal(readMultiLocationCandidateSelection("10/15 09:30〜10:30 アクト: アクト大会議室／有玉: 有玉大会議室 AER~アリア~", lines), 1);
+  assert.equal(readMultiLocationCandidateSelection("10/15 09:30〜10:30 アクト: 別の会議室／有玉: 有玉大会議室 AER~アリア~", lines), undefined);
 });
 
 it("recognizes re-search after a passed meeting without mistaking room changes for a refresh", () => {

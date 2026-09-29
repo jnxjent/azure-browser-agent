@@ -301,3 +301,89 @@ test("an organization reply resumes an open-ended search before intent analysis"
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test("two-location candidates remain selectable by copied line and number without a one-room booking", async () => {
+  const { server } = await import("./server.js");
+  const originalExecute = DeskNetsBrowserWorker.prototype.execute;
+  const originalFetch = globalThis.fetch;
+  const savedEnvironment = {
+    endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+    key: process.env.AZURE_OPENAI_API_KEY,
+    deployment: process.env.AZURE_OPENAI_DEPLOYMENT,
+    apiKey: process.env.AGENT_API_KEY,
+    multiUser: process.env.DESKNETS_MULTI_USER_ENABLED,
+  };
+  process.env.AZURE_OPENAI_ENDPOINT = "https://multi-location-choice-test.example";
+  process.env.AZURE_OPENAI_API_KEY = "test-key";
+  process.env.AZURE_OPENAI_DEPLOYMENT = "test-model";
+  delete process.env.AGENT_API_KEY;
+  delete process.env.DESKNETS_MULTI_USER_ENABLED;
+  let modelCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    if (!String(input).startsWith("https://multi-location-choice-test.example")) return originalFetch(input, init);
+    modelCalls += 1;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      intent: "find_availability", participants: [{ name: "鈴木清彦", organization: "事業部" }, { name: "私", organization: null }],
+      dateStart: "2099-10-05", dateEnd: "2099-10-16", durationMinutes: 60,
+      facilityQuery: null, candidateNumber: null, sendEmail: null, title: null,
+      selectedStart: null, selectedEnd: null,
+    }) } }] }), { status: 200 });
+  };
+  let workerCalls = 0;
+  const line = "1. 10/15 09:30〜10:30　アクト: アクト大会議室／有玉: 有玉大会議室 ＡＥＲ～アリア～";
+  DeskNetsBrowserWorker.prototype.execute = async (run: BrowserRun) => {
+    workerCalls += 1;
+    assert.equal(run.task?.type, "find_availability");
+    if (run.task?.type !== "find_availability") throw new Error("Unexpected task");
+    assert.deepEqual(run.task.requiredFacilityLocations, ["アクト", "有玉"]);
+    const availability = [{ start: "2099-10-15T00:30:00.000Z", end: "2099-10-15T01:30:00.000Z",
+      durationMinutes: 60, participantIds: ["1", "2"],
+      availableFacilityIds: ["アクト大会議室", "有玉大会議室 ＡＥＲ～アリア～"],
+      facilitiesByLocation: { アクト: ["アクト大会議室"], 有玉: ["有玉大会議室 ＡＥＲ～アリア～"] } }];
+    return { ...run, status: "completed", result: { summary: "Two-location availability", evidence: [],
+      assistantMessage: `${line}\n番号を選択してください。`, availability, multiLocationCandidateLines: [line] } };
+  };
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}/browser-agent/runs`;
+  const send = async (prompt: string): Promise<BrowserRun> => {
+    const response = await fetch(base, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: "multi-choice", threadId: "multi-choice", site: "desknets", mode: "read", prompt }) });
+    let run = await response.json() as BrowserRun;
+    assert.equal(response.status, 202, JSON.stringify(run));
+    for (let attempt = 0; ["queued", "running"].includes(run.status) && attempt < 100; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      run = await (await fetch(`${base}/${run.id}`)).json() as BrowserRun;
+    }
+    return run;
+  };
+  try {
+    const search = await send("2099年10月5日以降に事業部鈴木清彦部長、私でWEBミーティングを開催したいです。時間は1時間。鈴木部長は有玉本社、私はアクト事務所で参加しますのでそれぞれ1か所の会議室を確保できる候補日を教えてください。");
+    assert.equal(search.status, "completed", JSON.stringify(search));
+    const pasted = await send(line.replace(/^1\. /, ""));
+    assert.equal(pasted.status, "completed", JSON.stringify(pasted));
+    assert.match(pasted.result?.assistantMessage ?? "", /候補1を選択しました/);
+    assert.match(pasted.result?.assistantMessage ?? "", /2室の予約とWEB会議の作成はまだ行っていません/);
+    assert.equal(pasted.result?.approvalRequest, undefined);
+    const numbered = await send("では、1で");
+    assert.match(numbered.result?.assistantMessage ?? "", /候補1を選択しました/);
+    assert.equal(workerCalls, 1, "selection must not enter the one-room booking worker");
+    assert.equal(modelCalls, 1, "candidate selection must be deterministic");
+  } finally {
+    DeskNetsBrowserWorker.prototype.execute = originalExecute;
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries({
+      AZURE_OPENAI_ENDPOINT: savedEnvironment.endpoint,
+      AZURE_OPENAI_API_KEY: savedEnvironment.key,
+      AZURE_OPENAI_DEPLOYMENT: savedEnvironment.deployment,
+      AGENT_API_KEY: savedEnvironment.apiKey,
+      DESKNETS_MULTI_USER_ENABLED: savedEnvironment.multiUser,
+    })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
