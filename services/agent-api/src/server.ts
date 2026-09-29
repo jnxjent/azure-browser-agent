@@ -2649,9 +2649,33 @@ export function isParticipantChoiceCancellationRequest(prompt: string): boolean 
   );
 }
 
-function formatParticipantChoiceMessage(ambiguousName: string, organizations: string[]): string {
+function formatParticipantChoiceMessage(
+  ambiguousName: string,
+  organizations: string[],
+  candidates?: PendingParticipantChoice["candidates"],
+): string {
+  if (candidates?.length) {
+    const lines = candidates.map((candidate, index) =>
+      `${index + 1}. ${candidate.name}${candidate.organization ? `（${candidate.organization}）` : ""}`).join("\n");
+    return `${ambiguousName}さんの候補です。\n${lines}\n「候補1で」のように番号を指定してください。`;
+  }
   const lines = organizations.map((organization) => `・${organization}`).join("\n");
   return `${ambiguousName}さんが複数見つかりました。どちらですか？\n${lines}\n組織名で答えてください。`;
+}
+
+export function matchOfferedParticipantCandidate(
+  reply: string,
+  candidates: NonNullable<PendingParticipantChoice["candidates"]>,
+): { name: string; organization: string } | undefined {
+  const normalized = reply.normalize("NFKC").trim();
+  const numbered = normalized.match(/^(?:(?:では|それでは)[、,\s]*)?(?:候補)?\s*(\d+)(?:番|番目)?(?:で|です|を選んで)?[。.!！\s]*$/);
+  if (numbered?.[1] !== undefined) return candidates[Number(numbered[1]) - 1];
+  const exactNames = candidates.filter(candidate =>
+    normalizeFacilityName(candidate.name) === normalizeFacilityName(normalized));
+  if (exactNames.length === 1) return exactNames[0];
+  const organizations = matchOfferedOrganizations(normalized, candidates.map(candidate => candidate.organization));
+  const matching = candidates.filter(candidate => organizations.includes(candidate.organization));
+  return matching.length === 1 ? matching[0] : undefined;
 }
 
 function handleParticipantChoiceReply(
@@ -2660,8 +2684,13 @@ function handleParticipantChoiceReply(
   pending: PendingParticipantChoice,
   response: ServerResponse,
 ): void {
-  const matches = matchOfferedOrganizations(validatedInput.prompt, pending.organizations);
-  if (matches.length !== 1) {
+  const chosen = pending.candidates?.length
+    ? matchOfferedParticipantCandidate(validatedInput.prompt, pending.candidates)
+    : undefined;
+  const matches = chosen === undefined && !pending.candidates?.length
+    ? matchOfferedOrganizations(validatedInput.prompt, pending.organizations)
+    : [];
+  if (chosen === undefined && matches.length !== 1) {
     // Zero matches (unrecognized reply) or more than one (a genuinely
     // ambiguous reply) — keep the state and ask again rather than guessing.
     const askAgain: BrowserRun = {
@@ -2671,7 +2700,7 @@ function handleParticipantChoiceReply(
       updatedAt: new Date().toISOString(),
       result: {
         summary: "Organization choice was not recognized; asking again.",
-        assistantMessage: formatParticipantChoiceMessage(pending.ambiguousName, pending.organizations),
+        assistantMessage: formatParticipantChoiceMessage(pending.ambiguousName, pending.organizations, pending.candidates),
         evidence: [`Organizations: ${pending.organizations.join("、")}`],
       },
     };
@@ -2679,11 +2708,13 @@ function handleParticipantChoiceReply(
     sendJson(response, 202, askAgain);
     return;
   }
-  const matchedOrganization = matches[0] as string;
+  const matchedOrganization = chosen?.organization ?? matches[0] as string;
   pendingParticipantChoices.delete(conversationKey(validatedInput));
   const participants = pending.task.participants.map((participant, index) =>
     index === pending.participantIndex
-      ? { ...participant, organization: matchedOrganization, organizationFallback: false }
+      ? { ...participant,
+          ...(chosen === undefined ? {} : { name: chosen.name }),
+          organization: matchedOrganization, organizationFallback: false }
       : participant,
   );
   const resumed: BrowserRun = {

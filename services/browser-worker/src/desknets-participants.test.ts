@@ -50,6 +50,12 @@ it("prefers 当部 for the list, falls back company-wide only when absent, and k
   const local = { organization: "経営企画部" };
   assert.deepEqual(preferParticipantOrganization([...external, local], selectors[1]!), [local]);
   assert.deepEqual(preferParticipantOrganization(external, selectors[2]!), []);
+  assert.deepEqual(preferParticipantOrganization([
+    { organization: "㈱ミダックライナー 管理グループ" },
+    { organization: "ミダックライナー 営業グループ" },
+  ], { name: "鈴木", organization: "ミダックライナーの管理G" }), [
+    { organization: "㈱ミダックライナー 管理グループ" },
+  ]);
   const resolved = resolveSelfOrganizationParticipants([{name: "鈴木清彦", organization: "経営企画部"}], "経営企画部", "当部の髙田部長、鈴木清彦部長");
   assert.equal(resolved[0]?.organizationFallback, true);
 });

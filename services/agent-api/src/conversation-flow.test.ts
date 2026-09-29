@@ -239,7 +239,10 @@ test("an organization reply resumes an open-ended search before intent analysis"
       return { ...run, status: "awaiting_user_input", result: {
         summary: "Ambiguous participant", evidence: [],
         participantChoice: { task: run.task, participantIndex: 0, ambiguousName: "鈴木",
-          organizations: ["営業部", "総務部"] },
+          organizations: ["営業部", "総務部"], candidates: [
+            { name: "鈴木太郎", organization: "営業部" },
+            { name: "鈴木次郎", organization: "総務部" },
+          ] },
       } };
     }
     const availability = [{ start: "2099-10-05T01:00:00.000Z", end: "2099-10-05T03:00:00.000Z",
@@ -271,12 +274,13 @@ test("an organization reply resumes an open-ended search before intent analysis"
   try {
     const ambiguous = await send("2099年10月5日以降で鈴木さんとの120分の打ち合わせ候補を出して");
     assert.equal(ambiguous.status, "awaiting_user_input");
-    const resumed = await send("営業部です");
+    const resumed = await send("候補1で");
     assert.equal(resumed.status, "completed", JSON.stringify(resumed));
     assert.equal(resumed.task?.type, "find_availability");
     if (resumed.task?.type !== "find_availability") throw new Error("Unexpected resumed task");
     assert.equal(resumed.task.autoExtendSearch, true);
     assert.equal(resumed.task.participants[0]?.organization, "営業部");
+    assert.equal(resumed.task.participants[0]?.name, "鈴木太郎");
     assert.equal(resumed.task.facilityQuery, "有玉");
     assert.equal(resumed.task.facilityType, "reception_room");
     const card = await send("では1で");

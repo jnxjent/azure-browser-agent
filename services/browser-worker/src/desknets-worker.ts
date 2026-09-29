@@ -455,22 +455,28 @@ async function executeAvailabilityRun(
         // remaining date — no point continuing the loop. execute()'s
         // finally block discards the partially-filled form since this
         // return isn't "completed".
+        const organizations = Array.from(new Set(error.candidates.map(candidate => candidate.organization).filter(Boolean)));
+        const choices = error.candidates.map((candidate, index) =>
+          `${index + 1}. ${candidate.name}${candidate.organization ? `（${candidate.organization}）` : ""}`);
         return {
           ...run,
           status: "awaiting_user_input",
           updatedAt: new Date().toISOString(),
           result: {
-            summary: `Participant name "${error.participantName}" matched more than one organization.`,
-            assistantMessage: `${error.participantName}さんが複数見つかりました。どちらですか？\n${error.organizations.map((organization) => `・${organization}`).join("\n")}\n組織名で答えてください。`,
+            summary: `Participant "${error.participantName}" needs a candidate choice.`,
+            assistantMessage: error.requestedOrganization
+              ? `「${error.requestedOrganization}」という所属表記では${error.participantName}さんを一人に特定できませんでした。DeskNet'sに見つかった候補です。\n${choices.join("\n")}\n「候補1で」のように番号を指定してください。選択後、空き時間の検索を続けます。`
+              : `${error.participantName}さんが複数見つかりました。どちらですか？\n${choices.join("\n")}\n「候補1で」のように番号を指定してください。`,
             evidence: [
               `Ambiguous participant: ${error.participantName}`,
-              `Organizations: ${error.organizations.join("、")}`,
+              `Candidate count: ${error.candidates.length}`,
             ],
             participantChoice: {
               task,
               participantIndex: error.participantIndex,
               ambiguousName: error.participantName,
-              organizations: error.organizations,
+              organizations,
+              candidates: error.candidates,
             },
           },
         };
@@ -1174,7 +1180,8 @@ class AmbiguousParticipantError extends Error {
 
   constructor(
     public readonly participantName: string,
-    public readonly organizations: string[],
+    public readonly candidates: Array<{ name: string; organization: string }>,
+    public readonly requestedOrganization?: string,
   ) {
     super(`Participant name is ambiguous: ${participantName}.`);
     this.name = "AmbiguousParticipantError";
@@ -1196,7 +1203,8 @@ export async function selectParticipant(
   const resultsTable = participantResultsTable(dialog);
   const rows = resultsTable.locator("tbody tr");
   let sawNameMatch = false;
-  let matches: Array<{ row: Locator; organization: string }> = [];
+  let matches: Array<{ row: Locator; name: string; organization: string }> = [];
+  let unmatchedCandidates: Array<{ name: string; organization: string }> = [];
   for (const searchName of participantNameSearchVariants(selector.name)) {
     const previousResultsHtml = await participantResultsBaseline(resultsTable);
     await nameField.fill(searchName);
@@ -1225,7 +1233,7 @@ export async function selectParticipant(
     }));
     const exactNameMatches = candidates
       .filter((candidate) => candidate.name === searchName)
-      .map((candidate) => ({ row: rows.nth(candidate.index), organization: candidate.organization }));
+      .map((candidate) => ({ row: rows.nth(candidate.index), name: candidate.name!, organization: candidate.organization }));
     if (exactNameMatches.length > 0) {
       // A complete name identifies the person when unique. Department labels
       // in natural-language requests are often approximate; never let one
@@ -1236,31 +1244,31 @@ export async function selectParticipant(
     }
     const nameMatches = candidates
       .filter((candidate) => candidate.name?.startsWith(searchName))
-      .map((candidate) => ({ row: rows.nth(candidate.index), organization: candidate.organization }));
+      .map((candidate) => ({ row: rows.nth(candidate.index), name: candidate.name!, organization: candidate.organization }));
     if (nameMatches.length === 0) continue;
     sawNameMatch = true;
+    unmatchedCandidates = nameMatches.map(({ name, organization }) => ({ name, organization }));
     matches = preferParticipantOrganization(nameMatches, selector);
     if (matches.length > 0) break;
   }
 
   if (matches.length === 0) {
     if (!sawNameMatch) throw new Error(`Participant was not found: ${selector.name}`);
-    throw new Error(`Participant ${selector.name} was found, but none belong to the requested organization: ${selector.organization}`);
+    if (unmatchedCandidates.length > 0) {
+      throw new AmbiguousParticipantError(selector.name, unmatchedCandidates, selector.organization);
+    }
+    throw new Error(`Participant ${selector.name} was found but no selectable result was returned.`);
   }
   if (matches.length > 1) {
-    // Exclude rows DeskNet's didn't expose an organization for — offering ""
-    // as a choice would be unusable, and (server-side) an empty string would
-    // wrongly substring-match any reply at all.
-    const distinctOrganizations = Array.from(
-      new Set(matches.map((match) => match.organization).filter((organization) => organization !== "")),
-    );
-    if (distinctOrganizations.length > 1) {
-      throw new AmbiguousParticipantError(selector.name, distinctOrganizations);
+    const distinctCandidates = Array.from(new Map(matches.map(({ name, organization }) =>
+      [`${name}\u0000${organization}`, { name, organization }])).values());
+    if (distinctCandidates.length === matches.length) {
+      throw new AmbiguousParticipantError(selector.name, distinctCandidates);
     }
     throw new Error(`Participant name is ambiguous: ${selector.name}.`);
   }
 
-  const matchedRow = matches[0] as { row: Locator; organization: string };
+  const matchedRow = matches[0] as { row: Locator; name: string; organization: string };
   const addControl = matchedRow.row.locator("td.co-sel-button").getByText("追加", { exact: true });
   if ((await addControl.count()) !== 1) throw new Error(`Add control was not found for: ${selector.name}`);
   await addControl.click({ noWaitAfter: true });

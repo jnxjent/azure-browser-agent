@@ -129,3 +129,41 @@ test("duplicate exact full names still require disambiguation", async () => {
     assert.equal(await page.locator("button[data-selected='true']").count(), 0);
   } finally { await browser.close(); }
 });
+
+test("a surname with an unmatched department offers the actual people instead of failing", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="co-sel-dialog">
+      <ul><li class="co-sel-search"><a href="#">検索</a></li></ul>
+      <input name="name"><input name="key">
+      <section class="co-sel-search co-sel-chooser-items"><div class="co-sel-list-scroll">
+        <table class="co-sel-table-list"><tbody></tbody></table>
+      </div></section>
+    </div>`);
+    await page.evaluate(() => {
+      const nameField = document.querySelector<HTMLInputElement>('input[name="name"]')!;
+      const body = document.querySelector<HTMLTableSectionElement>('tbody')!;
+      nameField.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        body.innerHTML = `
+          <tr><td><span class="co-sel-name">鈴木太郎</span><span class="co-busyo-def">ミダックライナー総務部</span></td><td class="co-sel-button"><button>追加</button></td></tr>
+          <tr><td><span class="co-sel-name">鈴木次郎</span><span class="co-busyo-def">ミダックライナー営業部</span></td><td class="co-sel-button"><button>追加</button></td></tr>`;
+      });
+    });
+    await assert.rejects(
+      selectParticipant(page.locator(".co-sel-dialog"), page,
+        { name: "鈴木", organization: "ミダックライナー管理G" }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal(error.name, "AmbiguousParticipantError");
+        assert.deepEqual((error as Error & { candidates: unknown }).candidates, [
+          { name: "鈴木太郎", organization: "ミダックライナー総務部" },
+          { name: "鈴木次郎", organization: "ミダックライナー営業部" },
+        ]);
+        return true;
+      },
+    );
+    assert.equal(await page.locator("button").count(), 2);
+  } finally { await browser.close(); }
+});

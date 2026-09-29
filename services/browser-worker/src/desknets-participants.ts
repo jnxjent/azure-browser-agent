@@ -47,8 +47,16 @@ export function preferParticipantOrganization<T extends { organization: string }
   matches: T[], selector: ParticipantSelector,
 ): T[] {
   if (!selector.organization) return matches;
-  const local = matches.filter(match => match.organization.includes(selector.organization!));
+  const requested = normalizeOrganizationForLookup(selector.organization);
+  const local = matches.filter(match => normalizeOrganizationForLookup(match.organization).includes(requested));
   return local.length === 0 && selector.organizationFallback ? matches : local;
+}
+
+function normalizeOrganizationForLookup(value: string): string {
+  return value.normalize("NFKC").toUpperCase()
+    .replace(/(?:株式会社|\(株\)|㈱)/g, "")
+    .replace(/グループ/g, "G")
+    .replace(/[\sの・･()（）_\-]/g, "");
 }
 
 /** The common spelling 高田 refers to 髙田 in this workflow. */

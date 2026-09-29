@@ -161,6 +161,8 @@ export interface PendingParticipantChoice {
   participantIndex: number;
   ambiguousName: string;
   organizations: string[];
+  /** Exact people returned by DeskNet's when a surname or organization is ambiguous. */
+  candidates?: Array<{ name: string; organization: string }>;
 }
 
 export interface PendingBookingContext {
