@@ -61,11 +61,24 @@ export interface FindAvailabilityTask {
   endDate: string;
   durationMinutes: number;
   facilityQuery?: string;
+  /** Each location must have a separate free meeting room in the same slot. */
+  requiredFacilityLocations?: string[];
   title?: string;
   /** Offer up to five chronological choices, marking the first as earliest. */
   selectionMode?: "earliest";
   /** Search ahead for several choices when there is no end date. */
   autoExtendSearch?: boolean;
+}
+
+/** Read only the facility calendar; the requester's own schedule is not a constraint. */
+export interface FindRoomAvailabilityTask {
+  type: "find_room_availability";
+  facilityQuery: string;
+  date: string;
+  endDate: string;
+  durationMinutes: number;
+  windowStart: string;
+  windowEnd: string;
 }
 
 export interface BookMeetingTask {
@@ -116,6 +129,7 @@ export interface ShowCandidatesTask {
 export type DeskNetsTask =
   | { type: "clarify"; question: string }
   | FindAvailabilityTask
+  | FindRoomAvailabilityTask
   | ChangeAvailabilityDurationTask
   | FindFacilityAvailabilityTask
   | SelectBookingCandidateTask

@@ -4,7 +4,29 @@ import {
   filterFutureAvailability,
   findBookableAvailability,
   findCommonAvailability,
+  findMultiLocationAvailability,
 } from "./availability.js";
+
+it("requires people and a free room at both locations in the same hour", () => {
+  const slots = findMultiLocationAvailability({
+    window: { start: "2026-10-05T09:00:00+09:00", end: "2026-10-05T12:00:00+09:00" },
+    durationMinutes: 60,
+    schedules: [
+      { participantId: "鈴木清彦", busy: [{ start: "2026-10-05T09:00:00+09:00", end: "2026-10-05T10:00:00+09:00" }] },
+      { participantId: "私", busy: [] },
+    ],
+    facilities: [
+      { facilityId: "アクト大会議室", busy: [{ start: "2026-10-05T11:00:00+09:00", end: "2026-10-05T12:00:00+09:00" }] },
+      { facilityId: "有玉大会議室", busy: [{ start: "2026-10-05T09:00:00+09:00", end: "2026-10-05T10:00:00+09:00" }] },
+    ],
+    requiredFacilityLocations: ["アクト", "有玉"],
+  });
+  assert.equal(slots.length, 1);
+  assert.deepEqual(slots[0]?.facilitiesByLocation, {
+    アクト: ["アクト大会議室"], 有玉: ["有玉大会議室"],
+  });
+  assert.equal(slots[0]?.start, "2026-10-05T01:00:00.000Z");
+});
 
 describe("filterFutureAvailability", () => {
   it("omits past dates and already-started same-day slots", () => {

@@ -62,6 +62,8 @@ import {
   ensureWebMeeting,
 } from "./web-meeting-service.js";
 import { loadSharedIntentConfiguration } from "./intent-configuration.js";
+import { parseFacilityOnlyAvailability } from "./facility-only-availability.js";
+import { readRequiredFacilityLocations } from "./multi-location-request.js";
 
 loadSharedIntentConfiguration();
 
@@ -456,6 +458,21 @@ async function route(
         }
       }
     }
+    if (validatedInput.site === "desknets") {
+      const roomSearch = parseFacilityOnlyAvailability(
+        validatedInput.prompt, structuredCommand?.facility.preferred,
+      );
+      if (roomSearch !== undefined) {
+        const roomRun: BrowserRun = {
+          ...createRun({ ...validatedInput, mode: "read" }),
+          intentSource: "deterministic", task: roomSearch,
+        };
+        runs.set(roomRun.id, roomRun);
+        startRun(roomRun.id);
+        sendJson(response, 202, roomRun);
+        return;
+      }
+    }
     const registeredFacilityPreferences = parseFacilityPreferenceRegistration(
       validatedInput.prompt,
     );
@@ -845,6 +862,11 @@ async function route(
       }
       if (task.type === "find_availability") {
         task = inheritAvailabilityPreferences(task, conversation?.context, validatedInput.prompt);
+        const requiredFacilityLocations = readRequiredFacilityLocations(validatedInput.prompt);
+        if (requiredFacilityLocations !== undefined) {
+          const { facilityQuery: _singleFacility, ...withoutSingleFacility } = task;
+          task = { ...withoutSingleFacility, requiredFacilityLocations, facilityType: "meeting_room" };
+        }
         pendingParticipantChoices.delete(conversationKey(validatedInput));
         task = configureAvailabilitySearch(task, validatedInput.prompt, conversation?.context);
         const today = currentJapanDate();

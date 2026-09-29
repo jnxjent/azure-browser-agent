@@ -8,11 +8,14 @@ import {
   filterFutureAvailability,
   findBookableAvailability,
   findCommonAvailability,
+  findMultiLocationAvailability,
   type BookMeetingTask,
   type BookableAvailabilitySlot,
   type BrowserAction,
   type BrowserRun,
   type FindAvailabilityTask,
+  type FindRoomAvailabilityTask,
+  type MultiLocationAvailabilitySlot,
   type Observation,
   type PendingBookingContext,
   type ParticipantSchedule,
@@ -145,6 +148,12 @@ export class DeskNetsBrowserWorker implements RunExecutor {
       scheduleUrl.search = "?cmd=schindex";
       scheduleUrl.hash = "cmd=schweekgrp";
       this.scheduleUrl = scheduleUrl.href;
+      if (run.task?.type === "find_room_availability") {
+        return await executeRoomAvailabilityRun({
+          run, task: run.task, page, signal, limits: this.limits,
+          artifactDirectory, startedAt,
+        });
+      }
       if (run.task?.type === "find_availability") {
         const completed = await executeAvailabilityRun({
           run,
@@ -286,6 +295,101 @@ interface DeskNetsExecutionContext {
   startedAt: number;
 }
 
+async function executeRoomAvailabilityRun(
+  context: DeskNetsExecutionContext & { task: FindRoomAvailabilityTask },
+): Promise<BrowserRun> {
+  const { run, task, page, signal, limits, artifactDirectory, startedAt } = context;
+  const configuredHours = readMeetingHours();
+  const windowStart = task.windowStart > configuredHours.start ? task.windowStart : configuredHours.start;
+  const windowEnd = task.windowEnd < configuredHours.end ? task.windowEnd : configuredHours.end;
+  if (windowStart >= windowEnd) throw new TypeError("指定した時間帯が利用可能時間と重なりません。");
+  await ensureScheduleList(page);
+  const dates = enumerateDates(task.date, task.endDate);
+  const holidays = await readCompanyHolidays(page, dates);
+  const matchingRooms = new Set<string>();
+  const slots: BookableAvailabilitySlot[] = [];
+  let observation: Observation | undefined;
+  let inspectedDays = 0;
+  const query = task.facilityQuery.normalize("NFKC").replace(/\s+/g, "").toUpperCase();
+
+  for (const date of dates) {
+    signal.throwIfAborted();
+    assertWithinDuration(startedAt, limits.maxRunDurationMs);
+    const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+    if (weekday === 0 || weekday === 6 || holidays.has(date)) continue;
+    if (inspectedDays > 0) {
+      await discardPreparedForm(page);
+      await ensureScheduleList(page);
+    }
+    // The form needs the signed-in user selected to open the facility grid.
+    // Their busy intervals are deliberately ignored in this room-only search.
+    await openAvailabilityForm(page, {
+      type: "find_availability", participants: [], date, endDate: date,
+      durationMinutes: task.durationMinutes,
+    });
+    await confirmVisibleDialog(page, "登録先");
+    await openFacilityDialog(page);
+    const facilities = keepMeetingRoomFacilities(deduplicateFacilitySchedules(
+      await extractFacilitySchedules(page.locator("body"), `${date}T00:00:00+09:00`),
+    ));
+    const candidates = facilities.filter((facility) =>
+      facility.facilityId.normalize("NFKC").replace(/\s+/g, "").toUpperCase().includes(query),
+    );
+    const exact = candidates.filter((facility) =>
+      facility.facilityId.normalize("NFKC").replace(/\s+/g, "").toUpperCase() === query,
+    );
+    const matched = exact.length > 0 ? exact : candidates;
+    if (matched.length > 1) {
+      throw new TypeError(`設備「${task.facilityQuery}」に複数の候補があります: ${matched.map((room) => room.facilityId).join("、")}`);
+    }
+    for (const facility of matched) matchingRooms.add(facility.facilityId);
+    if (observation === undefined) {
+      observation = await observe(page, run.id, "after.png", artifactDirectory,
+        `Read facility availability for ${date}.`, ["Facility selector", "Facility availability grid"]);
+    }
+    await cancelVisibleDialog(page, "利用設備");
+    inspectedDays += 1;
+    if (matched.length === 0) continue;
+    const found = findBookableAvailability({
+      window: { start: `${date}T${windowStart}:00+09:00`, end: `${date}T${windowEnd}:00+09:00` },
+      durationMinutes: task.durationMinutes,
+      incrementMinutes: 30,
+      schedules: [{ participantId: "room-only-search", busy: [] }],
+      facilities: matched,
+    }).map((slot) => ({ ...slot, participantIds: [] }));
+    slots.push(...filterFutureAvailability(found));
+  }
+  if (inspectedDays > 0 && matchingRooms.size === 0) {
+    throw new TypeError(`設備「${task.facilityQuery}」がdesknet'sの利用設備一覧に見つかりません。`);
+  }
+  const selected: BookableAvailabilitySlot[] = [];
+  const perDate = new Map<string, number>();
+  for (const slot of slots.sort((a, b) => Date.parse(a.start) - Date.parse(b.start))) {
+    const date = japanDateFromInstant(slot.start);
+    const count = perDate.get(date) ?? 0;
+    if (count >= 3) continue;
+    if (selected.some((previous) => japanDateFromInstant(previous.start) === date &&
+        Date.parse(previous.end) > Date.parse(slot.start))) continue;
+    selected.push(slot);
+    perDate.set(date, count + 1);
+  }
+  const period = `${task.date}〜${task.endDate}`;
+  const message = selected.length === 0
+    ? `${period}の平日・${windowStart}〜${windowEnd}に、${task.facilityQuery}を${task.durationMinutes}分利用できる枠は確認できませんでした。`
+    : `desknet'sの利用設備予定を確認しました。${period}の平日・${windowStart}〜${windowEnd}で、${task.facilityQuery}を${task.durationMinutes}分利用できる候補です。\n${selected.map((slot) => `・${formatJapanDateTime(slot.start)}〜${formatJapanTime(slot.end)}`).join("\n")}\n空き状況は変わるため、予約時に再確認してください。`;
+  return {
+    ...run,
+    status: "completed",
+    updatedAt: new Date().toISOString(),
+    result: {
+      summary: `Read ${matchingRooms.size} matching desknet's facilities over ${inspectedDays} business days.`,
+      assistantMessage: message,
+      evidence: [`Facility query: ${task.facilityQuery}`, `Period: ${period}`, ...(observation ? [observation.screenshotRef] : [])],
+      availability: selected,
+    },
+  };
+}
+
 async function executeAvailabilityRun(
   context: DeskNetsExecutionContext & { task: FindAvailabilityTask },
 ): Promise<BrowserRun> {
@@ -316,6 +420,7 @@ async function executeAvailabilityRun(
   const participantAvailability: BookableAvailabilitySlot[] = [];
   const availability: BookableAvailabilitySlot[] = [];
   const allFacilityAvailability: BookableAvailabilitySlot[] = [];
+  const multiLocationAvailability: MultiLocationAvailabilitySlot[] = [];
   let participantIds: string[] = [];
   let participantRowCount = 0;
   let facilityRowCount = 0;
@@ -436,11 +541,25 @@ async function executeAvailabilityRun(
         availableFacilityIds: [],
       })),
     );
-    const filteredAvailability = filterFutureAvailability(findBookableAvailability({
-      ...availabilityRequest,
-      facilities: keepMeetingRoomFacilities(facilitySchedules, task.facilityType),
-    }));
+    const filteredAvailability = task.requiredFacilityLocations === undefined
+      ? filterFutureAvailability(findBookableAvailability({
+          ...availabilityRequest,
+          facilities: keepMeetingRoomFacilities(facilitySchedules, task.facilityType),
+        }))
+      : filterFutureAvailability(findMultiLocationAvailability({
+          ...availabilityRequest,
+          facilities: keepMeetingRoomFacilities(facilitySchedules, "meeting_room"),
+          requiredFacilityLocations: task.requiredFacilityLocations,
+        }));
     availability.push(...filteredAvailability);
+    if (task.requiredFacilityLocations !== undefined) {
+      multiLocationAvailability.push(...filteredAvailability as MultiLocationAvailabilitySlot[]);
+      assertWithinDuration(startedAt, limits.maxRunDurationMs);
+      signal.throwIfAborted();
+      if (task.autoExtendSearch &&
+          new Set(multiLocationAvailability.map((slot) => japanDateFromInstant(slot.start))).size >= 5) break;
+      continue;
+    }
     const { facilityQuery: _facilityQuery, ...companyWideRequest } = availabilityRequest;
     allFacilityAvailability.push(...(task.facilityQuery === undefined && task.facilityType === undefined
       ? filteredAvailability
@@ -457,6 +576,33 @@ async function executeAvailabilityRun(
   }
   assertWithinDuration(startedAt, limits.maxRunDurationMs);
   signal.throwIfAborted();
+
+  if (task.requiredFacilityLocations !== undefined) {
+    const candidates: MultiLocationAvailabilitySlot[] = [];
+    const perDate = new Map<string, number>();
+    for (const slot of multiLocationAvailability.sort((a, b) => Date.parse(a.start) - Date.parse(b.start))) {
+      const date = japanDateFromInstant(slot.start);
+      if ((perDate.get(date) ?? 0) >= 2 || candidates.some((previous) =>
+        japanDateFromInstant(previous.start) === date && Date.parse(previous.end) > Date.parse(slot.start))) continue;
+      candidates.push(slot);
+      perDate.set(date, (perDate.get(date) ?? 0) + 1);
+    }
+    const lines = candidates.map((slot) =>
+      `・${formatJapanDateTime(slot.start)}〜${formatJapanTime(slot.end)}　${task.requiredFacilityLocations!.map((location) =>
+        `${location}: ${slot.facilitiesByLocation[location]?.[0] ?? "未確認"}`).join("／")}`,
+    );
+    return {
+      ...run, status: "completed", updatedAt: new Date().toISOString(),
+      result: {
+        summary: `Verified simultaneous participant and meeting-room availability at ${task.requiredFacilityLocations.join(" and ")}.`,
+        assistantMessage: candidates.length === 0
+          ? `${task.date}〜${task.endDate}に、参加者全員と${task.requiredFacilityLocations.join("・")}の会議室が同時に${task.durationMinutes}分空いている候補はありませんでした。`
+          : `${task.date}〜${task.endDate}に、参加者全員と各拠点の会議室が同時に${task.durationMinutes}分空いている候補です。\n${lines.join("\n")}\n空き状況は変わるため、予約前に再確認してください。会議室の予約やWEB会議の作成は行っていません。`,
+        evidence: [observationBefore.screenshotRef, observationAfter.screenshotRef],
+        availability: candidates,
+      },
+    };
+  }
 
   const pendingBooking = {
     ...(task.autoExtendSearch === undefined ? {} : {autoExtendSearch:task.autoExtendSearch}),

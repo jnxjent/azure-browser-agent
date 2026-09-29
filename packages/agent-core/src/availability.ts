@@ -34,6 +34,10 @@ export interface BookableAvailabilitySlot extends CommonAvailabilitySlot {
   availableFacilityIds: string[];
 }
 
+export interface MultiLocationAvailabilitySlot extends BookableAvailabilitySlot {
+  facilitiesByLocation: Record<string, string[]>;
+}
+
 interface NumericInterval {
   start: number;
   end: number;
@@ -184,6 +188,37 @@ export function findBookableAvailability(
     return availableFacilityIds.length === 0
       ? []
       : [{ ...slot, availableFacilityIds }];
+  });
+}
+
+/** Intersect people and one free meeting room at every requested location. */
+export function findMultiLocationAvailability(
+  request: BookableAvailabilityRequest & { requiredFacilityLocations: string[] },
+): MultiLocationAvailabilitySlot[] {
+  const locations = request.requiredFacilityLocations.map((location) => location.trim());
+  if (locations.length < 2 || new Set(locations.map(normalizeFacilityName)).size !== locations.length) {
+    throw new TypeError("At least two distinct facility locations are required.");
+  }
+  const byLocation = locations.map((location) => ({
+    location,
+    slots: findBookableAvailability({ ...request, facilityQuery: location }),
+  }));
+  const otherLocations = byLocation.slice(1);
+  return (byLocation[0]?.slots ?? []).flatMap((first) => {
+    const matching = otherLocations.map(({ location, slots }) => ({
+      location,
+      slot: slots.find((slot) => slot.start === first.start && slot.end === first.end),
+    }));
+    if (matching.some(({ slot }) => slot === undefined)) return [];
+    const facilitiesByLocation = Object.fromEntries([
+      [locations[0], first.availableFacilityIds],
+      ...matching.map(({ location, slot }) => [location, slot!.availableFacilityIds]),
+    ]) as Record<string, string[]>;
+    return [{
+      ...first,
+      availableFacilityIds: Object.values(facilitiesByLocation).flat(),
+      facilitiesByLocation,
+    }];
   });
 }
 
