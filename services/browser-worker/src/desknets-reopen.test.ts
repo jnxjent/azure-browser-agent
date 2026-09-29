@@ -14,7 +14,7 @@ const fixture = `<!doctype html><meta charset="utf-8">
  <select class="co-timepicker-minute"><option>0分</option><option>30分</option></select>`).join("")}
  <a href="#" class="jsch-entry-target-chooser" onclick="document.getElementById('people').hidden=false;return false">登録先</a>
  <a href="#" class="jsch-entry-target-chooser" onclick="document.getElementById('rooms').hidden=false;return false">利用設備</a>
- <span id="chosen"></span>
+ <span id="chosen"></span><div class="sch-row-plant" id="plants"></div>
  <label><input type="checkbox" id="email" checked>メール</label>
  <label><input type="checkbox" id="suppress" checked>自分には通知しない</label>
  <button onclick="window.registrations++">追加</button>
@@ -27,11 +27,19 @@ const fixture = `<!doctype html><meta charset="utf-8">
 <div id="rooms" class="ui-dialog" hidden>
  <div class="sch-entry-plant-tab"><a href="#sch-entry-plant-tab-reserve" onclick="return false">予約状況</a></div>
  <div class="sch-entry-plant-reserve-list"><table><tbody><tr>
- <td><span class="sch-entry-plant-name">会議室A</span><input type="checkbox"></td><td style="width:240px">空き</td>
- </tr></tbody></table></div>
- <button onclick="document.getElementById('chosen').textContent='会議室A';document.getElementById('rooms').hidden=true">OK</button>
+ <td><span class="sch-entry-plant-name">会議室A</span><input type="checkbox" value="13"></td><td style="width:240px">空き</td>
+ </tr><tr><td><span class="sch-entry-plant-name">会議室B</span><input type="checkbox" value="14"></td><td style="width:240px">空き</td></tr></tbody></table></div>
+ <button onclick="applyRooms();document.getElementById('rooms').hidden=true">OK</button>
  <button onclick="document.getElementById('rooms').hidden=true">キャンセル</button>
-</div><script>window.registrations=0</script>`;
+</div><script>window.registrations=0;function applyRooms(){
+const selected=Array.from(document.querySelectorAll('#rooms tr')).filter(row=>row.querySelector('input').checked);
+document.getElementById('chosen').textContent=selected.map(row=>row.querySelector('.sch-entry-plant-name').textContent).join('、');
+const plants=document.getElementById('plants');plants.replaceChildren();
+selected.forEach(row=>{const id=row.querySelector('input').value;const name=row.querySelector('.sch-entry-plant-name').textContent;
+const item=document.createElement('div');item.className='co-selitem';
+const input=document.createElement('input');input.name='pids';input.value=id;item.appendChild(input);
+const label=document.createElement('a');label.dataset.pid=id;label.textContent=name;item.appendChild(label);plants.appendChild(item);});
+}</script>`;
 
 test("orange-button handoff recreates a closed tab and restores all booking fields", async () => {
   const browser = await chromium.launch({headless:true});
@@ -86,5 +94,34 @@ test("orange-button handoff recreates a closed tab and restores all booking fiel
     assert.equal(blank.status,"awaiting_user_input");
     assert.equal(await context.pages()[0]!.locator('input[name="detail"]').inputValue(),"");
     assert.equal(await context.pages()[0]!.evaluate(()=> (window as unknown as {registrations:number}).registrations),0);
+  } finally { await browser.close(); }
+});
+
+test("one unsaved DeskNet's form selects and verifies both meeting rooms", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
+  await context.route("https://desk.example/**", route => route.fulfill({contentType:"text/html; charset=utf-8", body:fixture}));
+  const blocked = new Set<string>();
+  const worker = new DeskNetsBrowserWorker({limits:{allowedDomains:["desk.example"],maxSteps:20,maxRunDurationMs:60_000},
+    loadCredentials:async()=>({credentials:{origin:"https://desk.example",app:{username:"test",password:"fake-secret"}},
+      blocked:async k=>blocked.has(k),block:async k=>{blocked.add(k);},clear:async k=>{blocked.delete(k);}})});
+  (worker as unknown as {browserConnection:Promise<Browser>}).browserConnection = Promise.resolve(browser);
+  try {
+    const page = await context.newPage();
+    await page.goto("https://desk.example/dneo.cgi?cmd=schindex#cmd=schweekgrp");
+    const slot = {start:"2099-09-18T01:30:00.000Z",end:"2099-09-18T02:00:00.000Z",durationMinutes:30,
+      participantIds:["本人"],availableFacilityIds:["会議室A","会議室B"],
+      facilitiesByLocation:{アクト:["会議室A"],有玉:["会議室B"]}};
+    const run = createRun({userId:"test",threadId:"multi-room",site:"desknets",mode:"write",prompt:"候補1で"});
+    run.task = {type:"book_meeting",title:"WEB会議",facilityQueries:["会議室A","会議室B"],
+      selectedStart:slot.start,selectedEnd:slot.end,sendEmail:true};
+    run.context = {date:"2099-09-18",durationMinutes:30,participants:[],participantIds:["本人"],availability:[slot]};
+    const prepared = await worker.execute(run,new AbortController().signal);
+    assert.equal(prepared.status,"awaiting_approval",JSON.stringify(prepared));
+    assert.deepEqual(prepared.result?.approvalRequest?.facilityIds,["会議室A","会議室B"]);
+    assert.deepEqual(prepared.result?.approvalRequest?.nativeFacilityIds,["13","14"]);
+    assert.deepEqual(prepared.result?.approvalRequest?.nativeUserIds,["123"]);
+    assert.equal(await page.locator('#chosen').innerText(),"会議室A、会議室B");
+    assert.equal(await page.evaluate(()=> (window as unknown as {registrations:number}).registrations),0);
   } finally { await browser.close(); }
 });

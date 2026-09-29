@@ -171,7 +171,12 @@ export class DeskNetsBrowserWorker implements RunExecutor {
         return completed;
       }
       if (run.task?.type === "book_meeting") {
-        const completed = await executeBookingRun({
+        const completed = run.task.facilityQueries !== undefined
+          ? await executeMultiBookingRun({
+              run, task: run.task, page, signal, limits: this.limits,
+              artifactDirectory, startedAt,
+            })
+          : await executeBookingRun({
           run,
           task: run.task,
           page,
@@ -601,6 +606,17 @@ async function executeAvailabilityRun(
         evidence: [observationBefore.screenshotRef, observationAfter.screenshotRef],
         availability: candidates,
         multiLocationCandidateLines: lines,
+        pendingBooking: {
+          date: task.date,
+          endDate: task.endDate,
+          durationMinutes: task.durationMinutes,
+          participants: task.participants,
+          ...(task.title === undefined ? {} : { title: task.title }),
+          participantIds,
+          availability: candidates,
+          ...(userOrganization === undefined ? {} : { userOrganization }),
+          ...(userDisplayName === undefined ? {} : { userDisplayName }),
+        },
       },
     };
   }
@@ -654,6 +670,67 @@ async function executeAvailabilityRun(
       ],
       availability,
       pendingBooking,
+    },
+  };
+}
+
+async function executeMultiBookingRun(
+  context: DeskNetsExecutionContext & { task: BookMeetingTask },
+): Promise<BrowserRun> {
+  const { run, task, page, signal, limits, artifactDirectory } = context;
+  const facilities = task.facilityQueries;
+  const pending = run.context;
+  if (!pending || !facilities || facilities.length < 2 ||
+      new Set(facilities).size !== facilities.length ||
+      !task.selectedStart || !task.selectedEnd) {
+    throw new Error("複数拠点の予約候補が失われました。空き時間を再検索してください。");
+  }
+  const slot = pending.availability.find(candidate =>
+    candidate.start === task.selectedStart && candidate.end === task.selectedEnd &&
+    facilities.every(room => candidate.availableFacilityIds.includes(room)));
+  if (!slot) throw new Error("指定した日時に２室が空いていません。候補を再検索してください。");
+  if (Date.parse(slot.start) <= Date.now()) throw new Error("開始時刻を過ぎました。候補を再検索してください。");
+  const date = japanDateFromInstant(slot.start);
+  signal.throwIfAborted();
+  await ensurePreparedBookingFormForCandidate(page, pending, date, signal);
+  await fillBookingForm(page, task, slot, facilities, date);
+  await assertBookingFormMatches(page, task, slot, facilities[0]!, date, pending.participantIds);
+  const nativeFacilityIds = await readNativeFacilityIds(page, facilities);
+  const nativeUserIds = await page.locator('input[name="otherto"]').evaluateAll(elements =>
+    elements.map(element => (element as HTMLInputElement).value));
+  if (!nativeFacilityIds || nativeUserIds.length !== pending.participantIds.length ||
+      new Set(nativeUserIds).size !== nativeUserIds.length ||
+      nativeUserIds.some(id => !/^\d{1,20}$/.test(id))) {
+    throw new Error("２室または参加者の引き渡しIDを確認できません。候補を再検索してください。");
+  }
+  signal.throwIfAborted();
+  const observation = await observe(page, run.id, "before.png", artifactDirectory,
+    "Verified the unsaved form with all requested participants and both meeting rooms.",
+    ["Date and time", "Participants", "Both facilities", "Email notification"]);
+  await bringPreparedFormToFront(page);
+  const approvalRequest = {
+    title: task.title,
+    start: slot.start,
+    end: slot.end,
+    participantIds: pending.participantIds,
+    facilityId: facilities[0]!,
+    facilityIds: facilities,
+    nativeFacilityId: nativeFacilityIds[0]!,
+    nativeFacilityIds,
+    nativeUserIds,
+    emailNotificationWillBeSent: task.sendEmail,
+  };
+  assertActionAllowed({ type: "type_text", target: "予定フォーム", text: task.title }, limits, "write");
+  return {
+    ...run,
+    status: "awaiting_approval",
+    updatedAt: new Date().toISOString(),
+    approval: { requestedAt: new Date().toISOString() },
+    result: {
+      summary: "Prepared one DeskNet's form with two meeting rooms for manual registration.",
+      assistantMessage: "２室を設定した予定内容を確認してください。オレンジのボタンでDeskNet'sの予定追加画面を開き、２室が選択されていることを確認してから、DeskNet's上の「追加」を手動で押してください。まだ登録していません。",
+      evidence: [observation.screenshotRef],
+      approvalRequest,
     },
   };
 }
@@ -1225,7 +1302,7 @@ async function fillBookingForm(
   page: Page,
   task: BookMeetingTask,
   slot: BookableAvailabilitySlot,
-  facilityId: string,
+  facilityId: string | string[],
   date: string,
 ): Promise<void> {
   await setFormDate(page, date);
@@ -1243,9 +1320,10 @@ async function fillBookingForm(
   await page.locator('input[name="detail"]:visible').fill(task.title);
 
   await openFacilityDialog(page);
-  await verifyLiveFacilityAvailability(page, facilityId, slot, date);
+  const facilityIds = Array.isArray(facilityId) ? facilityId : [facilityId];
+  for (const room of facilityIds) await verifyLiveFacilityAvailability(page, room, slot, date);
   const dialog = locateVisibleDialog(page, "利用設備");
-  await selectExactFacility(dialog, facilityId);
+  await selectExactFacilities(dialog, facilityIds);
   await confirmVisibleDialog(page, "利用設備");
 
   const checkboxes = page.locator('input[type="checkbox"]:visible');
@@ -1269,26 +1347,39 @@ async function fillBookingForm(
 }
 
 export async function readNativeFacilityId(page: Page, facilityName: string): Promise<string | undefined> {
+  return (await readNativeFacilityIds(page, [facilityName]))?.[0];
+}
+
+export async function readNativeFacilityIds(page: Page, facilityNames: string[]): Promise<string[] | undefined> {
+  if (facilityNames.length === 0 || new Set(facilityNames).size !== facilityNames.length) return undefined;
   const selected = await page.locator('.sch-row-plant input[name="pids"]').evaluateAll(elements => elements.map(element => {
     const input = element as HTMLInputElement;
     const label = input.closest('.co-selitem')?.querySelector('a[data-pid]');
     return {id:input.value,label:label?.textContent?.trim(),labelId:label?.getAttribute('data-pid')};
   }));
-  const room = selected[0];
-  return selected.length === 1 && room && /^\d{1,20}$/.test(room.id) &&
-    room.label === facilityName && room.labelId === room.id ? room.id : undefined;
+  if (selected.length !== facilityNames.length) return undefined;
+  const ids = facilityNames.map(name => {
+    const room = selected.find(item => item.label === name);
+    return room && /^\d{1,20}$/.test(room.id) && room.labelId === room.id ? room.id : undefined;
+  });
+  return ids.every(id => id !== undefined) && new Set(ids).size === ids.length ? ids as string[] : undefined;
 }
 
 export async function selectExactFacility(dialog: Locator, facilityId: string): Promise<void> {
-  const rows = dialog.locator(".sch-entry-plant-reserve-list table tbody tr");
-  const room = rows.getByText(facilityId, { exact: true });
-  if ((await room.count()) !== 1) throw new Error(`Facility row was not found: ${facilityId}`);
+  await selectExactFacilities(dialog, [facilityId]);
+}
 
-  const checkbox = room
-    .locator("xpath=ancestor::tr[1]")
-    .locator('input[type="checkbox"]');
-  if ((await checkbox.count()) !== 1) {
-    throw new Error(`Facility checkbox was not found: ${facilityId}`);
+export async function selectExactFacilities(dialog: Locator, facilityIds: string[]): Promise<void> {
+  if (facilityIds.length === 0 || new Set(facilityIds).size !== facilityIds.length) {
+    throw new Error("Distinct meeting rooms are required.");
+  }
+  const rows = dialog.locator(".sch-entry-plant-reserve-list table tbody tr");
+  for (const facilityId of facilityIds) {
+    const room = rows.getByText(facilityId, { exact: true });
+    if ((await room.count()) !== 1) throw new Error(`Facility row was not found: ${facilityId}`);
+    if ((await room.locator("xpath=ancestor::tr[1]").locator('input[type="checkbox"]').count()) !== 1) {
+      throw new Error(`Facility checkbox was not found: ${facilityId}`);
+    }
   }
 
   // A booking has exactly one facility. Reusing a prepared form must replace
@@ -1296,8 +1387,8 @@ export async function selectExactFacility(dialog: Locator, facilityId: string): 
   const previousSelections = await rows.evaluateAll((elements, requested) => elements.flatMap((row, index) => {
     const name = row.querySelector(".sch-entry-plant-name")?.textContent?.trim();
     const selected = row.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked;
-    return selected && name !== requested ? [index] : [];
-  }), facilityId);
+    return selected && !requested.includes(name ?? "") ? [index] : [];
+  }), facilityIds);
   for (const index of previousSelections) {
     const previous = rows.nth(index).locator('input[type="checkbox"]');
     await previous.evaluate((element) => element.scrollIntoView({ block: "center", inline: "nearest" }));
@@ -1316,26 +1407,29 @@ export async function selectExactFacility(dialog: Locator, facilityId: string): 
   // normal checkbox action can repeatedly scroll the outer dialog and still
   // consider a valid row outside the viewport, so center the exact DOM-backed
   // row first and use a native click as a narrowly scoped fallback.
-  await checkbox.evaluate((element) => {
-    element.scrollIntoView({ block: "center", inline: "nearest" });
-  });
-  try {
-    await checkbox.check({ timeout: 3_000 });
-  } catch (error) {
+  for (const facilityId of facilityIds) {
+    const checkbox = rows.getByText(facilityId, { exact: true })
+      .locator("xpath=ancestor::tr[1]").locator('input[type="checkbox"]');
     await checkbox.evaluate((element) => {
-      const input = element as HTMLInputElement;
-      if (!input.checked) input.click();
+      element.scrollIntoView({ block: "center", inline: "nearest" });
     });
-    if (!(await checkbox.isChecked())) throw error;
-  }
-  if (!(await checkbox.isChecked())) {
-    throw new Error(`Facility checkbox did not stay selected: ${facilityId}`);
+    try {
+      await checkbox.check({ timeout: 3_000 });
+    } catch (error) {
+      await checkbox.evaluate((element) => {
+        const input = element as HTMLInputElement;
+        if (!input.checked) input.click();
+      });
+      if (!(await checkbox.isChecked())) throw error;
+    }
+    if (!(await checkbox.isChecked())) throw new Error(`Facility checkbox did not stay selected: ${facilityId}`);
   }
   const selectedNames = await rows.evaluateAll((elements) => elements
     .filter((row) => row.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked)
     .map((row) => row.querySelector(".sch-entry-plant-name")?.textContent?.trim()));
-  if (selectedNames.length !== 1 || selectedNames[0] !== facilityId) {
-    throw new Error("会議室を1件だけに変更できませんでした。利用設備の選択を確認してください。");
+  if (selectedNames.length !== facilityIds.length ||
+      selectedNames.some(name => !facilityIds.includes(name ?? ""))) {
+    throw new Error("指定した会議室をすべて選択できませんでした。利用設備の選択を確認してください。");
   }
 }
 

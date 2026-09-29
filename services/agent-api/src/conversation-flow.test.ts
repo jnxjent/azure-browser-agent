@@ -302,7 +302,7 @@ test("an organization reply resumes an open-ended search before intent analysis"
   }
 });
 
-test("two-location candidates remain selectable by copied line and number without a one-room booking", async () => {
+test("two-location candidates open one card with two rooms for manual registration", async () => {
   const { server } = await import("./server.js");
   const originalExecute = DeskNetsBrowserWorker.prototype.execute;
   const originalFetch = globalThis.fetch;
@@ -333,6 +333,19 @@ test("two-location candidates remain selectable by copied line and number withou
   const line = "1. 10/15 09:30〜10:30　アクト: アクト大会議室／有玉: 有玉大会議室 ＡＥＲ～アリア～";
   DeskNetsBrowserWorker.prototype.execute = async (run: BrowserRun) => {
     workerCalls += 1;
+    if (run.task?.type === "book_meeting") {
+      assert.deepEqual(run.task.facilityQueries, ["アクト大会議室", "有玉大会議室 ＡＥＲ～アリア～"]);
+      assert.equal(run.task.selectedStart, "2099-10-15T00:30:00.000Z");
+      return { ...run, status: "awaiting_approval", result: {
+        summary: "Two rooms prepared", evidence: [], approvalRequest: {
+          title: "", start: run.task.selectedStart!, end: run.task.selectedEnd!,
+          participantIds: ["鈴木清彦", "本人"], nativeUserIds: ["101", "102"],
+          facilityId: "アクト大会議室", nativeFacilityId: "13",
+          facilityIds: run.task.facilityQueries, nativeFacilityIds: ["13", "14"],
+          emailNotificationWillBeSent: true,
+        },
+      } };
+    }
     assert.equal(run.task?.type, "find_availability");
     if (run.task?.type !== "find_availability") throw new Error("Unexpected task");
     assert.deepEqual(run.task.requiredFacilityLocations, ["アクト", "有玉"]);
@@ -341,7 +354,8 @@ test("two-location candidates remain selectable by copied line and number withou
       availableFacilityIds: ["アクト大会議室", "有玉大会議室 ＡＥＲ～アリア～"],
       facilitiesByLocation: { アクト: ["アクト大会議室"], 有玉: ["有玉大会議室 ＡＥＲ～アリア～"] } }];
     return { ...run, status: "completed", result: { summary: "Two-location availability", evidence: [],
-      assistantMessage: `${line}\n番号を選択してください。`, availability, multiLocationCandidateLines: [line] } };
+      assistantMessage: `${line}\n番号を選択してください。`, availability, multiLocationCandidateLines: [line],
+      pendingBooking: { ...run.task, participantIds: ["鈴木清彦", "本人"], availability } } };
   };
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -363,13 +377,17 @@ test("two-location candidates remain selectable by copied line and number withou
     const search = await send("2099年10月5日以降に事業部鈴木清彦部長、私でWEBミーティングを開催したいです。時間は1時間。鈴木部長は有玉本社、私はアクト事務所で参加しますのでそれぞれ1か所の会議室を確保できる候補日を教えてください。");
     assert.equal(search.status, "completed", JSON.stringify(search));
     const pasted = await send(line.replace(/^1\. /, ""));
-    assert.equal(pasted.status, "completed", JSON.stringify(pasted));
-    assert.match(pasted.result?.assistantMessage ?? "", /候補1を選択しました/);
-    assert.match(pasted.result?.assistantMessage ?? "", /2室の予約とWEB会議の作成はまだ行っていません/);
-    assert.equal(pasted.result?.approvalRequest, undefined);
+    assert.equal(pasted.status, "awaiting_approval", JSON.stringify(pasted));
+    assert.deepEqual(pasted.result?.approvalRequest?.facilityIds, ["アクト大会議室", "有玉大会議室 ＡＥＲ～アリア～"]);
+    const handoffResponse = await fetch(`${base}/${pasted.id}/handoff`, { headers: {
+      "x-user-id": "multi-choice", "x-chat-thread-id": "multi-choice",
+    } });
+    assert.equal(handoffResponse.status, 200);
+    const handoff = await handoffResponse.json() as { handoffUrl: string };
+    assert.deepEqual(new URLSearchParams(new URL(handoff.handoffUrl).hash.slice(1)).getAll("pid"), ["13", "14"]);
     const numbered = await send("では、1で");
-    assert.match(numbered.result?.assistantMessage ?? "", /候補1を選択しました/);
-    assert.equal(workerCalls, 1, "selection must not enter the one-room booking worker");
+    assert.deepEqual(numbered.result?.approvalRequest?.facilityIds, ["アクト大会議室", "有玉大会議室 ＡＥＲ～アリア～"]);
+    assert.equal(workerCalls, 3);
     assert.equal(modelCalls, 1, "candidate selection must be deterministic");
   } finally {
     DeskNetsBrowserWorker.prototype.execute = originalExecute;

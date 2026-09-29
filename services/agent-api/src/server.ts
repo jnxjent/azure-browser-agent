@@ -587,23 +587,28 @@ async function route(
       const slot = multiLocationCandidates.candidates[multiLocationSelection - 1];
       if (slot === undefined) throw new TypeError("有効な候補番号を指定してください。");
       assertSlotHasNotStarted(slot);
-      const selected = createRun({ ...validatedInput, mode: "read" });
-      const roomLines = Object.entries(slot.facilitiesByLocation).map(
-        ([location, rooms]) => `${location}: ${rooms[0] ?? "未確認"}`,
-      );
-      const completed: BrowserRun = {
-        ...selected,
-        status: "completed",
-        updatedAt: new Date().toISOString(),
-        result: {
-          summary: `Selected multi-location candidate ${multiLocationSelection}.`,
-          assistantMessage: `候補${multiLocationSelection}を選択しました。\n${multiLocationCandidates.lines[multiLocationSelection - 1]}\n対象会議室: ${roomLines.join("／")}。\nこれは空き状況の確認結果です。2室の予約とWEB会議の作成はまだ行っていません。2室はそれぞれDeskNet'sで予約してください。`,
-          evidence: [`Candidate ${multiLocationSelection}: ${slot.start} to ${slot.end}`],
-          availability: [slot],
+      const facilityQueries = Object.values(slot.facilitiesByLocation).map(rooms => rooms[0]);
+      if (facilityQueries.length < 2 || facilityQueries.some(room => room === undefined) ||
+          new Set(facilityQueries).size !== facilityQueries.length) {
+        throw new TypeError("２拠点の会議室を特定できません。候補を再検索してください。");
+      }
+      const context = savedConversation?.context;
+      if (context === undefined) throw new TypeError("参加者の空き時間が失われました。候補を再検索してください。");
+      const selected: BrowserRun = {
+        ...createRun({ ...validatedInput, mode: "write" }),
+        task: {
+          type: "book_meeting",
+          facilityQueries: facilityQueries as string[],
+          title: context.title ?? "",
+          sendEmail: true,
+          selectedStart: slot.start,
+          selectedEnd: slot.end,
         },
+        context,
       };
-      runs.set(completed.id, completed);
-      sendJson(response, 202, completed);
+      runs.set(selected.id, selected);
+      startRun(selected.id);
+      sendJson(response, 202, selected);
       return;
     }
     const selectedCandidate = readNumberedCandidateSelection(validatedInput.prompt);
@@ -1199,8 +1204,14 @@ async function route(
       }
       try {
         const nativeFacilityId = "nativeFacilityId" in approval ? approval.nativeFacilityId : undefined;
+        const nativeFacilityIds = "nativeFacilityIds" in approval ? approval.nativeFacilityIds : undefined;
+        if (approval.facilityIds !== undefined &&
+            (nativeFacilityIds?.length !== approval.facilityIds.length || nativeFacilityIds[0] !== nativeFacilityId)) {
+          throw new Error("２室の引き渡し情報がありません。候補を選び直してください。");
+        }
         if (approval.facilityId && !nativeFacilityId) throw new Error("会議室の引き渡し情報がありません。候補を選び直してください。");
-        const handoffUrl=buildDeskNetsHandoffUrl({start:approval.start,end:approval.end,userIds:approval.nativeUserIds,facilityId:nativeFacilityId});
+        const handoffUrl=buildDeskNetsHandoffUrl({start:approval.start,end:approval.end,userIds:approval.nativeUserIds,
+          facilityId:nativeFacilityId, ...(nativeFacilityIds === undefined ? {} : {facilityIds:nativeFacilityIds})});
         response.setHeader("Cache-Control","no-store");
         sendJson(response,200,{handoffUrl,status:"awaiting_native_confirmation",registered:false});
       } catch(error) {

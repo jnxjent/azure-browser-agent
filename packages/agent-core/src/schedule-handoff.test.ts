@@ -29,6 +29,16 @@ test("room handoff uses a validated native equipment ID, never a display name", 
     assert.throws(()=>buildDeskNetsHandoffUrl({...input,facilityId},now));
   }
 });
+test("one handoff URL carries two verified equipment IDs for one manual registration", () => {
+  const input = {start:"2026-10-06T05:00:00Z",end:"2026-10-06T06:00:00Z",userIds:["101","102"],
+    facilityId:"13",facilityIds:["13","14"]};
+  const hash = new URLSearchParams(new URL(buildDeskNetsHandoffUrl(input,now)).hash.slice(1));
+  assert.deepEqual(hash.getAll("pid"),["13","14"]);
+  assert.deepEqual(hash.getAll("id"),["101","102"]);
+  for (const facilityIds of [["13","13"],["13","会議室"],["14","13"]]) {
+    assert.throws(() => buildDeskNetsHandoffUrl({...input,facilityIds},now));
+  }
+});
 function fixture() {
   return draftFromDeskNetsApproval({title:"打ち合わせ",start:"2026-09-19T01:00:00Z",end:"2026-09-19T02:00:00Z",
     participantIds:["本人"],facilityId:"会議室A",emailNotificationWillBeSent:false},

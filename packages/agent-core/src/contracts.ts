@@ -90,6 +90,8 @@ export interface BookMeetingTask {
   excludePreviousFacility?: boolean;
   type: "book_meeting";
   facilityQuery?: string;
+  /** Two or more rooms selected from one verified multi-location slot. */
+  facilityQueries?: string[];
   title: string;
   sendEmail: boolean;
   selectedStart?: string;
@@ -193,6 +195,7 @@ export interface BookingResult {
 export interface BookingApprovalRequest {
   /** Verified DeskNet's equipment ID, not the facility display name. */
   nativeFacilityId?: string | undefined;
+  nativeFacilityIds?: string[];
   /** Verified native user IDs, not the legacy participantIds display names. */
   nativeUserIds?: string[];
   title: string;
@@ -200,17 +203,20 @@ export interface BookingApprovalRequest {
   end: string;
   participantIds: string[];
   facilityId: string;
+  facilityIds?: string[];
   emailNotificationWillBeSent: boolean;
 }
 
 export interface ManualBookingActionRequest {
   nativeFacilityId?: string | undefined;
+  nativeFacilityIds?: string[];
   nativeUserIds?: string[];
   title: string;
   start: string;
   end: string;
   participantIds: string[];
   facilityId: string;
+  facilityIds?: string[];
   emailNotificationWillBeSent: boolean;
   selfNotificationSuppressed: false;
 }
