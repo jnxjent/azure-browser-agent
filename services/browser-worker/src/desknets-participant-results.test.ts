@@ -73,3 +73,59 @@ test("participant search maps 高田 to 髙田 and retries when zero results hid
     }
   } finally { await browser.close(); }
 });
+
+test("a unique exact full name wins over an approximate department and prefix matches", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="co-sel-dialog">
+      <ul><li class="co-sel-search"><a href="#">検索</a></li></ul>
+      <input name="name"><input name="key">
+      <section class="co-sel-search co-sel-chooser-items"><div class="co-sel-list-scroll">
+        <table class="co-sel-table-list"><tbody></tbody></table>
+      </div></section>
+    </div>`);
+    await page.evaluate(() => {
+      const nameField = document.querySelector<HTMLInputElement>('input[name="name"]')!;
+      const body = document.querySelector<HTMLTableSectionElement>('tbody')!;
+      nameField.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        body.innerHTML = `
+          <tr><td><span class="co-sel-name">鈴木清彦</span><span class="co-busyo-def">経営企画部</span></td><td class="co-sel-button"><button type="button" onclick="this.dataset.selected='true'">追加</button></td></tr>
+          <tr><td><span class="co-sel-name">鈴木清彦太郎</span><span class="co-busyo-def">事業部</span></td><td class="co-sel-button"><button type="button" onclick="this.dataset.selected='true'">追加</button></td></tr>`;
+      });
+    });
+    await selectParticipant(page.locator(".co-sel-dialog"), page, { name: "鈴木清彦", organization: "事業部" });
+    assert.equal(await page.locator("button[data-selected='true']").count(), 1);
+    assert.equal(await page.locator("button[data-selected='true']").locator("../..").locator(".co-sel-name").innerText(), "鈴木清彦");
+  } finally { await browser.close(); }
+});
+
+test("duplicate exact full names still require disambiguation", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="co-sel-dialog">
+      <ul><li class="co-sel-search"><a href="#">検索</a></li></ul>
+      <input name="name"><input name="key">
+      <section class="co-sel-search co-sel-chooser-items"><div class="co-sel-list-scroll">
+        <table class="co-sel-table-list"><tbody></tbody></table>
+      </div></section>
+    </div>`);
+    await page.evaluate(() => {
+      const nameField = document.querySelector<HTMLInputElement>('input[name="name"]')!;
+      const body = document.querySelector<HTMLTableSectionElement>('tbody')!;
+      nameField.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        body.innerHTML = `
+          <tr><td><span class="co-sel-name">鈴木清彦</span><span class="co-busyo-def">事業部</span></td><td class="co-sel-button"><button type="button" onclick="this.dataset.selected='true'">追加</button></td></tr>
+          <tr><td><span class="co-sel-name">鈴木清彦</span><span class="co-busyo-def">経営企画部</span></td><td class="co-sel-button"><button type="button" onclick="this.dataset.selected='true'">追加</button></td></tr>`;
+      });
+    });
+    await assert.rejects(
+      selectParticipant(page.locator(".co-sel-dialog"), page, { name: "鈴木清彦", organization: "事業部" }),
+      /ambiguous/,
+    );
+    assert.equal(await page.locator("button[data-selected='true']").count(), 0);
+  } finally { await browser.close(); }
+});

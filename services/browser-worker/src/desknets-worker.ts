@@ -1140,6 +1140,17 @@ export async function selectParticipant(
         organization: organizations.length === 1 ? organizations[0]!.innerText.trim() : "",
       };
     }));
+    const exactNameMatches = candidates
+      .filter((candidate) => candidate.name === searchName)
+      .map((candidate) => ({ row: rows.nth(candidate.index), organization: candidate.organization }));
+    if (exactNameMatches.length > 0) {
+      // A complete name identifies the person when unique. Department labels
+      // in natural-language requests are often approximate; never let one
+      // override an exact name or disambiguate duplicate exact names.
+      sawNameMatch = true;
+      matches = exactNameMatches;
+      break;
+    }
     const nameMatches = candidates
       .filter((candidate) => candidate.name?.startsWith(searchName))
       .map((candidate) => ({ row: rows.nth(candidate.index), organization: candidate.organization }));
