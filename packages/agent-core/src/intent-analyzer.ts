@@ -150,7 +150,6 @@ async function requestStructuredIntent(
 function validateStructuredIntent(value: StructuredIntent, prompt: string): DeskNetsTask {
   if (value.intent === "clarify") return { type: "clarify", question: readText(value.question ?? null, "question") };
   if (value.intent === "find_availability") {
-    if (value.participants.length === 0) throw new TypeError("LLM intent omitted participants.");
     const date = readIsoDate(value.dateStart, "dateStart");
     // A model can leave an open-ended "X日以降" request without dateEnd.
     // Apply the same seven-day window used when the request omits a date.
@@ -168,7 +167,6 @@ function validateStructuredIntent(value: StructuredIntent, prompt: string): Desk
           : readText(participant.organization, "participant organization");
       return organization === undefined ? { name } : { name, organization };
     });
-    if (participants.length === 0) throw new TypeError("本人以外の参加者を指定してください。");
     const keys = participants.map((participant) => `${participant.name}:${participant.organization ?? ""}`);
     if (new Set(keys).size !== keys.length) {
       throw new TypeError("LLM intent returned duplicate participants.");

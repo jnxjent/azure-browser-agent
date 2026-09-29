@@ -78,8 +78,11 @@ export function parseDeskNetsTask(
     /(?:ルーム|会議室)/.test(normalized)
   ) {
     return {
-      type: "find_facility_availability",
+      type: "find_availability",
+      participants: [],
       facilityQuery: readFacilityQuery(normalized),
+      ...readDateRange(normalized, now),
+      durationMinutes: readDurationMinutes(normalized) ?? 60,
     };
   }
 

@@ -302,6 +302,77 @@ test("an organization reply resumes an open-ended search before intent analysis"
   }
 });
 
+test("one room search intersects the requester and candidate one opens their card", async () => {
+  const { server } = await import("./server.js");
+  const originalExecute = DeskNetsBrowserWorker.prototype.execute;
+  const savedApiKey = process.env.AGENT_API_KEY;
+  const savedMultiUser = process.env.DESKNETS_MULTI_USER_ENABLED;
+  delete process.env.AGENT_API_KEY;
+  delete process.env.DESKNETS_MULTI_USER_ENABLED;
+  const slot = {
+    start: "2099-10-06T04:00:00.000Z", end: "2099-10-06T05:00:00.000Z",
+    durationMinutes: 60, participantIds: ["本人"],
+    availableFacilityIds: ["アクト中会議室"],
+  };
+  let workerCalls = 0;
+  DeskNetsBrowserWorker.prototype.execute = async (run: BrowserRun) => {
+    workerCalls += 1;
+    if (run.task?.type === "find_availability") {
+      assert.deepEqual(run.task.participants, [], "the worker adds the signed-in requester");
+      assert.equal(run.task.facilityQuery, "アクト中会議室");
+      assert.equal(run.task.durationMinutes, 60);
+      return { ...run, status: "completed", result: {
+        summary: "Requester and room both free", evidence: [], availability: [slot],
+        assistantMessage: "1. 10/6 13:00〜14:00 アクト中会議室",
+        pendingBooking: { ...run.task, participantIds: ["本人"], availability: [slot] },
+      } };
+    }
+    assert.equal(run.task?.type, "book_meeting");
+    if (run.task?.type !== "book_meeting") throw new Error("Unexpected task");
+    assert.equal(run.task.facilityQuery, "アクト中会議室");
+    assert.equal(run.task.selectedStart, slot.start);
+    assert.equal(run.task.selectedEnd, slot.end);
+    assert.deepEqual(run.context?.participantIds, ["本人"]);
+    return { ...run, status: "awaiting_approval", result: {
+      summary: "One room prepared for manual confirmation", evidence: [],
+      approvalRequest: { title: "", start: slot.start, end: slot.end,
+        participantIds: ["本人"], facilityId: "アクト中会議室",
+        emailNotificationWillBeSent: true },
+    } };
+  };
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}/browser-agent/runs`;
+  const send = async (prompt: string): Promise<BrowserRun> => {
+    const response = await fetch(base, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: "self-room", threadId: "self-room", site: "desknets", mode: "read", prompt }) });
+    let run = await response.json() as BrowserRun;
+    assert.equal(response.status, 202, JSON.stringify(run));
+    for (let attempt = 0; ["queued", "running"].includes(run.status) && attempt < 100; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      run = await (await fetch(`${base}/${run.id}`)).json() as BrowserRun;
+    }
+    return run;
+  };
+  try {
+    const search = await send("2099年10月5日以降、アクト中会議室が1時間空いている候補を教えて");
+    assert.equal(search.status, "completed", JSON.stringify(search));
+    const chosen = await send("では候補の中の1で。");
+    assert.equal(chosen.status, "awaiting_approval", JSON.stringify(chosen));
+    assert.deepEqual(chosen.result?.approvalRequest?.participantIds, ["本人"]);
+    assert.equal(chosen.result?.approvalRequest?.facilityId, "アクト中会議室");
+    assert.equal(workerCalls, 2);
+  } finally {
+    DeskNetsBrowserWorker.prototype.execute = originalExecute;
+    if (savedApiKey === undefined) delete process.env.AGENT_API_KEY; else process.env.AGENT_API_KEY = savedApiKey;
+    if (savedMultiUser === undefined) delete process.env.DESKNETS_MULTI_USER_ENABLED; else process.env.DESKNETS_MULTI_USER_ENABLED = savedMultiUser;
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("two-location candidates open one card with two rooms for manual registration", async () => {
   const { server } = await import("./server.js");
   const originalExecute = DeskNetsBrowserWorker.prototype.execute;

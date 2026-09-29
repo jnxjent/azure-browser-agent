@@ -419,10 +419,14 @@ describe("parseDeskNetsTask", () => {
     );
   });
 
-  it("parses a facility availability follow-up", () => {
-    assert.deepEqual(parseDeskNetsTask("ルームCが空いている時間帯は？"), {
-      type: "find_facility_availability",
+  it("includes the requester in a room-only availability question", () => {
+    assert.deepEqual(parseDeskNetsTask("ルームCが空いている時間帯は？", new Date("2026-09-29T00:00:00Z")), {
+      type: "find_availability",
+      participants: [],
       facilityQuery: "ルームC",
+      date: "2026-09-29",
+      endDate: "2026-10-05",
+      durationMinutes: 60,
     });
   });
 

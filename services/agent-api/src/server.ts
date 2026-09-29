@@ -163,7 +163,7 @@ const WEB_REQUEST_ONLY = /^(?:web|ウェブ|オンライン|teams|チームズ|�
 export function readNumberedCandidateSelection(prompt: string): number | undefined {
   const normalized = prompt.normalize("NFKC").trim();
   const match = normalized.match(
-    /^(?:では|それでは|じゃあ)?[、,\s]*(?:上記|候補(?:の)?)?[、,\s]*(\d+)(?:番|番目)?(?:で|を選んで|にして)(?:お願いします)?[、,。.!！\s]*(.*)$/,
+    /^(?:では|それでは|じゃあ)?[、,\s]*(?:上記|候補(?:の中)?(?:の)?)?[、,\s]*(\d+)(?:番|番目)?(?:で|を選んで|にして)(?:お願いします)?[、,。.!！\s]*(.*)$/,
   );
   if (match?.[1] === undefined) return undefined;
   const remainder = (match[2] ?? "").trim();
@@ -485,9 +485,19 @@ async function route(
         validatedInput.prompt, structuredCommand?.facility.preferred,
       );
       if (roomSearch !== undefined) {
+        // A room search must also check the signed-in requester's calendar.
+        // The normal availability worker selects that person automatically and
+        // saves numbered slots for a later confirmation card.
         const roomRun: BrowserRun = {
           ...createRun({ ...validatedInput, mode: "read" }),
-          intentSource: "deterministic", task: roomSearch,
+          intentSource: "deterministic",
+          task: {
+            type: "find_availability", participants: [],
+            facilityQuery: roomSearch.facilityQuery,
+            date: roomSearch.date, endDate: roomSearch.endDate,
+            durationMinutes: roomSearch.durationMinutes,
+            windowStart: roomSearch.windowStart, windowEnd: roomSearch.windowEnd,
+          },
         };
         runs.set(roomRun.id, roomRun);
         startRun(roomRun.id);
@@ -535,6 +545,8 @@ async function route(
         intentSource:"deterministic",
         task:{type:"find_availability",participants:context.participants ?? [],date:today,endDate,
           durationMinutes:context.durationMinutes,selectionMode:context.selectionMode ?? "earliest",autoExtendSearch:context.autoExtendSearch ?? false,
+          ...(context.windowStart === undefined ? {} : {windowStart:context.windowStart}),
+          ...(context.windowEnd === undefined ? {} : {windowEnd:context.windowEnd}),
           ...(context.facilityType === undefined ? {} : {facilityType:context.facilityType}),
           ...(context.facilityQuery === undefined ? {} : {facilityQuery:context.facilityQuery})},
       };
@@ -612,8 +624,19 @@ async function route(
       return;
     }
     const selectedCandidate = readNumberedCandidateSelection(validatedInput.prompt);
+    const standaloneRoomTask = savedConversation === undefined && validatedInput.site === "desknets"
+      ? (() => {
+          try {
+            const parsed = parseDeskNetsTask(validatedInput.prompt);
+            return parsed.type === "find_availability" && parsed.participants.length === 0 && parsed.facilityQuery
+              ? parsed : undefined;
+          } catch { return undefined; }
+        })()
+      : undefined;
     let semanticAnalysis = savedConversation?.candidates !== undefined && selectedCandidate !== undefined
       ? { source: "deterministic" as const, task: { type: "select_booking_candidate" as const, candidateNumber: selectedCandidate } }
+      : standaloneRoomTask !== undefined
+      ? { source: "deterministic" as const, task: standaloneRoomTask }
       : validatedInput.site === "desknets" && readAzureOpenAIIntentConfig() !== undefined
       ? await analyzeDeskNetsIntent(validatedInput.prompt, new Date(), {
           conversationHistory: validatedInput.conversationHistory ?? [],

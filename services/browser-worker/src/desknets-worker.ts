@@ -534,7 +534,10 @@ async function executeAvailabilityRun(
     await cancelVisibleDialog(page, "利用設備");
 
     const availabilityRequest = {
-      window: { start: `${date}T${meetingHours.start}:00+09:00`, end: `${date}T${meetingHours.end}:00+09:00` },
+      window: {
+        start: `${date}T${task.windowStart && task.windowStart > meetingHours.start ? task.windowStart : meetingHours.start}:00+09:00`,
+        end: `${date}T${task.windowEnd && task.windowEnd < meetingHours.end ? task.windowEnd : meetingHours.end}:00+09:00`,
+      },
       durationMinutes: task.durationMinutes,
       incrementMinutes: 30,
       schedules: participantSchedules,
@@ -628,6 +631,8 @@ async function executeAvailabilityRun(
     endDate: task.endDate,
     durationMinutes: task.durationMinutes,
     participants: task.participants,
+    ...(task.windowStart === undefined ? {} : { windowStart: task.windowStart }),
+    ...(task.windowEnd === undefined ? {} : { windowEnd: task.windowEnd }),
     ...(task.facilityType === undefined ? {} : { facilityType: task.facilityType }),
     ...(task.facilityQuery === undefined ? {} : { facilityQuery: task.facilityQuery }),
     ...(task.title === undefined ? {} : { title: task.title }),
@@ -650,7 +655,7 @@ async function executeAvailabilityRun(
           "Select the requested participants, read their availability, then inspect facilities while preserving the unsaved form for a possible follow-up booking.",
         action,
         observationAfter,
-        verified: participantRowCount >= 2 && facilityRowCount > 0,
+        verified: participantRowCount >= 1 && facilityRowCount > 0,
       },
     ],
     result: {

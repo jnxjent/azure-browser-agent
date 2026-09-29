@@ -60,6 +60,9 @@ export interface FindAvailabilityTask {
   date: string;
   endDate: string;
   durationMinutes: number;
+  /** Optional requested time window, intersected with configured meeting hours. */
+  windowStart?: string;
+  windowEnd?: string;
   facilityQuery?: string;
   /** Each location must have a separate free meeting room in the same slot. */
   requiredFacilityLocations?: string[];
@@ -162,6 +165,8 @@ export interface PendingParticipantChoice {
 
 export interface PendingBookingContext {
   facilityType?: "meeting_room" | "reception_room" | "any";
+  windowStart?: string;
+  windowEnd?: string;
   selectionMode?: "earliest";
   autoExtendSearch?: boolean;
   originalAvailability?: BookableAvailabilitySlot[];
