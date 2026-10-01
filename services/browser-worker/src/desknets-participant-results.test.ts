@@ -2,7 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium } from "playwright";
 import { participantResultsBaseline, participantResultsTable } from "./desknets-participant-results.js";
-import { selectParticipant } from "./desknets-worker.js";
+import { retainCandidateWindows, selectParticipant } from "./desknets-worker.js";
+
+test("participant refinement retains only the previously displayed time windows", () => {
+  const slots = [
+    { start: "2026-10-07T04:00:00.000Z", end: "2026-10-07T05:00:00.000Z", room: "品川" },
+    { start: "2026-10-07T05:00:00.000Z", end: "2026-10-07T06:00:00.000Z", room: "品川" },
+  ];
+  assert.deepEqual(retainCandidateWindows(slots, [slots[1]!]), [slots[1]]);
+  assert.equal(retainCandidateWindows(slots, undefined), slots);
+});
 
 test("participant search ignores hidden duplicate listings and handles first/repeated search", async () => {
   const browser = await chromium.launch({ headless: true });

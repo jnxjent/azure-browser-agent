@@ -420,7 +420,9 @@ async function executeAvailabilityRun(
   const action: BrowserAction = { type: "click", target: "利用設備" };
   assertActionAllowed(action, limits, "read");
   const searchEnd = task.autoExtendSearch ? new Date(Date.parse(`${task.date}T00:00:00Z`) + 30 * 86_400_000).toISOString().slice(0,10) : task.endDate;
-  const dates = enumerateDates(task.date, searchEnd);
+  const dates = task.candidateWindows === undefined
+    ? enumerateDates(task.date, searchEnd)
+    : Array.from(new Set(task.candidateWindows.map((slot) => japanDateFromInstant(slot.start)))).sort();
   const holidays = await readCompanyHolidays(page, dates);
   const participantAvailability: BookableAvailabilitySlot[] = [];
   const availability: BookableAvailabilitySlot[] = [];
@@ -555,7 +557,7 @@ async function executeAvailabilityRun(
         availableFacilityIds: [],
       })),
     );
-    const filteredAvailability = task.requiredFacilityLocations === undefined
+    const unscopedAvailability = task.requiredFacilityLocations === undefined
       ? filterFutureAvailability(findBookableAvailability({
           ...availabilityRequest,
           facilities: keepMeetingRoomFacilities(facilitySchedules, task.facilityType),
@@ -568,6 +570,10 @@ async function executeAvailabilityRun(
             ? {}
             : { requiredFacilityQueries: task.requiredFacilityQueries }),
         }));
+    const filteredAvailability = retainCandidateWindows(
+      unscopedAvailability,
+      task.candidateWindows,
+    );
     availability.push(...filteredAvailability);
     if (task.requiredFacilityLocations !== undefined) {
       multiLocationAvailability.push(...filteredAvailability as MultiLocationAvailabilitySlot[]);
@@ -625,6 +631,10 @@ async function executeAvailabilityRun(
           endDate: task.endDate,
           durationMinutes: task.durationMinutes,
           participants: task.participants,
+          requiredFacilityLocations: task.requiredFacilityLocations,
+          ...(task.requiredFacilityQueries === undefined
+            ? {}
+            : { requiredFacilityQueries: task.requiredFacilityQueries }),
           ...(task.title === undefined ? {} : { title: task.title }),
           participantIds,
           availability: candidates,
@@ -1668,6 +1678,15 @@ export function formatAvailabilityMessage(
   if (candidates.length === 0) return `${date}〜${endDate}は、現在以降に${durationMinutes}分の打ち合わせを設定できる候補がありません。`;
   const lines = candidates.map((slot, index) => `${index + 1}. ${formatJapanDateTime(slot.start)}〜${formatJapanTime(slot.end)}（${durationMinutes}分）`);
   return `${date}〜${endDate}の候補は開始時刻順です。${availability.length > 50 ? "先頭50件を表示します。" : ""}\n${lines.join("\n")}\n「では、1で」のように番号で選択してください。会議室は登録済みの優先順位、メール送信と本人への通知はオンを初期値にします。`;
+}
+
+export function retainCandidateWindows<T extends { start: string; end: string }>(
+  slots: T[],
+  candidateWindows: Array<{ start: string; end: string }> | undefined,
+): T[] {
+  if (candidateWindows === undefined) return slots;
+  const allowed = new Set(candidateWindows.map((slot) => `${slot.start}\n${slot.end}`));
+  return slots.filter((slot) => allowed.has(`${slot.start}\n${slot.end}`));
 }
 
 function japanDateFromInstant(value: string): string {

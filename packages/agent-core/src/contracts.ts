@@ -68,6 +68,8 @@ export interface FindAvailabilityTask {
   requiredFacilityLocations?: string[];
   /** Optional exact room query corresponding to each requested location. */
   requiredFacilityQueries?: string[];
+  /** Existing displayed candidates to retain when adding participants. */
+  candidateWindows?: Array<{ start: string; end: string }>;
   title?: string;
   /** Offer up to five chronological choices, marking the first as earliest. */
   selectionMode?: "earliest";
@@ -180,6 +182,8 @@ export interface PendingBookingContext {
   durationMinutes: number;
   participants?: ParticipantSelector[];
   facilityQuery?: string;
+  requiredFacilityLocations?: string[];
+  requiredFacilityQueries?: string[];
   title?: string;
   participantIds: string[];
   availability: BookableAvailabilitySlot[];

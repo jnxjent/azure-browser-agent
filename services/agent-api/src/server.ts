@@ -546,6 +546,22 @@ async function route(
       ? findPendingApproval(validatedInput.userId, validatedInput.threadId)
       : undefined;
     const savedConversation = pendingBookings.get(conversationKey(validatedInput));
+    const participantRefinement = validatedInput.site === "desknets"
+      ? buildParticipantCandidateRefinement(validatedInput.prompt, savedConversation)
+      : undefined;
+    if (participantRefinement !== undefined) {
+      cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId);
+      pendingMultiLocationCandidates.delete(conversationKey(validatedInput));
+      const refined: BrowserRun = {
+        ...createRun({ ...validatedInput, mode: "read" }),
+        intentSource: "deterministic",
+        task: participantRefinement,
+      };
+      runs.set(refined.id, refined);
+      startRun(refined.id);
+      sendJson(response, 202, refined);
+      return;
+    }
     if (validatedInput.site === "desknets" && savedConversation !== undefined &&
         isAvailabilityRefreshRequest(validatedInput.prompt) && !hasExplicitSearchPeriod(validatedInput.prompt)) {
       const context = savedConversation.context;
@@ -2265,6 +2281,54 @@ export function inheritAvailabilityPreferences(
         !prompt.includes(saved.organization ?? "")
         ? { ...participant, organizationFallback: true } : participant;
     }),
+  };
+}
+
+export function buildParticipantCandidateRefinement(
+  prompt: string,
+  saved: PendingBookingConversation | undefined,
+): FindAvailabilityTask | undefined {
+  if (saved === undefined || saved.candidates === undefined || saved.candidates.length === 0) return undefined;
+  const text = prompt.normalize("NFKC").replace(/\s+/g, "");
+  const referencesCandidates =
+    /(?:上記|先ほど|さっき|この|その)(?:の)?(?:候補)?(?:から|のうち|の内)/.test(text) ||
+    /(?:上記|先ほど|さっき|この|その)?候補(?:日|日時|時間|枠)?(?:の)?(?:うち|内)/.test(text);
+  const addsParticipant = /参加者.*(?:加え|追加)|(?:参加でき|出席でき|都合が?つ|空いて).*(?:候補|絞り込)|候補.*(?:参加でき|出席でき|都合が?つ|空いて)/.test(text);
+  if (!referencesCandidates || !addsParticipant) return undefined;
+  let parsed: DeskNetsTask;
+  try {
+    const addedName = text.match(/参加者(?:に|として)?[、,:：]?(.{2,40}?)(?:も)?(?:加え|追加)/)?.[1];
+    parsed = parseDeskNetsTask(addedName === undefined ? prompt : `${addedName}の空き時間を調べて`);
+  } catch {
+    return undefined;
+  }
+  if (parsed.type !== "find_availability" || parsed.participants.length === 0 ||
+      parsed.participants.some((participant) => participant.name === "参加者")) return undefined;
+
+  const participants = [...(saved.context.participants ?? []), ...parsed.participants].filter(
+    (participant, index, all) => all.findIndex((candidate) =>
+      candidate.name === participant.name && candidate.organization === participant.organization,
+    ) === index,
+  );
+  const endDate = saved.context.endDate ?? saved.context.date;
+  return {
+    type: "find_availability",
+    participants,
+    date: saved.context.date,
+    endDate,
+    durationMinutes: saved.context.durationMinutes,
+    candidateWindows: saved.candidates.map(({ start, end }) => ({ start, end })),
+    ...(saved.context.windowStart === undefined ? {} : { windowStart: saved.context.windowStart }),
+    ...(saved.context.windowEnd === undefined ? {} : { windowEnd: saved.context.windowEnd }),
+    ...(saved.context.facilityType === undefined ? {} : { facilityType: saved.context.facilityType }),
+    ...(saved.context.facilityQuery === undefined ? {} : { facilityQuery: saved.context.facilityQuery }),
+    ...(saved.context.requiredFacilityLocations === undefined
+      ? {}
+      : { requiredFacilityLocations: saved.context.requiredFacilityLocations }),
+    ...(saved.context.requiredFacilityQueries === undefined
+      ? {}
+      : { requiredFacilityQueries: saved.context.requiredFacilityQueries }),
+    ...(saved.context.title === undefined ? {} : { title: saved.context.title }),
   };
 }
 

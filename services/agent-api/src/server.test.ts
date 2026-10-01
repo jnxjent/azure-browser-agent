@@ -4,6 +4,7 @@ import type { BookableAvailabilitySlot, FindAvailabilityTask } from "@azure-brow
 import { createRun } from "@azure-browser-agent/agent-core";
 import {
   buildShowCandidatesResponse,
+  buildParticipantCandidateRefinement,
   configureAvailabilitySearch,
   isAvailabilityRefreshRequest,
   hasExplicitSearchPeriod,
@@ -39,6 +40,41 @@ import {
   resolveTimeOnlySelection,
   type PendingBookingConversation,
 } from "./server.js";
+
+it("refines only the displayed candidates when another participant is added", () => {
+  const candidates: BookableAvailabilitySlot[] = [
+    { start: "2026-10-07T04:00:00.000Z", end: "2026-10-07T05:00:00.000Z", durationMinutes: 60,
+      participantIds: ["本人"], availableFacilityIds: ["品川オフィス会議室"] },
+    { start: "2026-10-08T06:00:00.000Z", end: "2026-10-08T07:00:00.000Z", durationMinutes: 60,
+      participantIds: ["本人"], availableFacilityIds: ["品川オフィス会議室"] },
+  ];
+  const saved: PendingBookingConversation = {
+    candidates,
+    context: {
+      date: "2026-10-05", endDate: "2026-11-04", durationMinutes: 60,
+      participants: [], participantIds: ["本人"], availability: candidates,
+      requiredFacilityLocations: ["品川"], requiredFacilityQueries: ["品川の会議室"],
+    },
+  };
+  const task = buildParticipantCandidateRefinement(
+    "上記候補の内、鈴木清彦部長が参加できる候補を挙げて",
+    saved,
+  );
+  assert.deepEqual(task?.participants, [{ name: "鈴木清彦" }]);
+  assert.deepEqual(task?.candidateWindows, candidates.map(({ start, end }) => ({ start, end })));
+  assert.deepEqual(task?.requiredFacilityLocations, ["品川"]);
+  assert.deepEqual(task?.requiredFacilityQueries, ["品川の会議室"]);
+  assert.equal(task?.date, "2026-10-05");
+  assert.equal(task?.endDate, "2026-11-04");
+
+  const naturalFollowUp = buildParticipantCandidateRefinement(
+    "参加者に、鈴木清彦部長も加えたいので、上記から部長の空いている候補に絞り込んで",
+    { ...saved, context: { ...saved.context, durationMinutes: 120 } },
+  );
+  assert.deepEqual(naturalFollowUp?.participants, [{ name: "鈴木清彦" }]);
+  assert.equal(naturalFollowUp?.durationMinutes, 120);
+  assert.deepEqual(naturalFollowUp?.candidateWindows, task?.candidateWindows);
+});
 
 const START = "2026-08-24T00:30:00.000Z";
 
