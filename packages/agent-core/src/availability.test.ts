@@ -28,6 +28,70 @@ it("requires people and a free room at both locations in the same hour", () => {
   assert.equal(slots[0]?.start, "2026-10-05T01:00:00.000Z");
 });
 
+it("matches an explicitly requested room whose registered name has a suffix", () => {
+  const slots = findMultiLocationAvailability({
+    window: { start: "2026-10-05T13:00:00+09:00", end: "2026-10-05T18:00:00+09:00" },
+    durationMinutes: 120,
+    schedules: [{ participantId: "野元潤一", busy: [] }],
+    facilities: [
+      { facilityId: "アクト中会議室", busy: [] },
+      { facilityId: "アクト大会議室", busy: [] },
+      { facilityId: "有玉大会議室　ＡＥＲ～アリア～", busy: [] },
+    ],
+    requiredFacilityLocations: ["アクト", "有玉"],
+    requiredFacilityQueries: ["アクト中会議室", "有玉大会議室"],
+  });
+  assert.deepEqual(slots[0]?.facilitiesByLocation, {
+    アクト: ["アクト中会議室"],
+    有玉: ["有玉大会議室　ＡＥＲ～アリア～"],
+  });
+});
+
+it("intersects three specified rooms at three locations", () => {
+  const slots = findMultiLocationAvailability({
+    window: { start: "2026-10-05T13:00:00+09:00", end: "2026-10-05T16:00:00+09:00" },
+    durationMinutes: 60,
+    schedules: [{ participantId: "本人", busy: [] }],
+    facilities: [
+      { facilityId: "アクト中会議室", busy: [] },
+      { facilityId: "有玉大会議室 AER～アリア～", busy: [] },
+      { facilityId: "品川大会議室", busy: [{ start: "2026-10-05T14:00:00+09:00", end: "2026-10-05T15:00:00+09:00" }] },
+    ],
+    requiredFacilityLocations: ["アクト", "有玉", "品川"],
+    requiredFacilityQueries: ["アクト中会議室", "有玉大会議室", "品川大会議室"],
+  });
+  assert.deepEqual(slots.map((slot) => slot.start), [
+    "2026-10-05T04:00:00.000Z",
+    "2026-10-05T06:00:00.000Z",
+  ]);
+  assert.deepEqual(slots[0]?.facilitiesByLocation, {
+    アクト: ["アクト中会議室"],
+    有玉: ["有玉大会議室 AER～アリア～"],
+    品川: ["品川大会議室"],
+  });
+});
+
+it("treats 品川の会議室 as any 品川 meeting room and excludes the reception room", () => {
+  const slots = findMultiLocationAvailability({
+    window: { start: "2026-10-05T13:00:00+09:00", end: "2026-10-05T14:00:00+09:00" },
+    durationMinutes: 60,
+    schedules: [{ participantId: "本人", busy: [] }],
+    facilities: [
+      { facilityId: "アクト中会議室", busy: [] },
+      { facilityId: "有玉大会議室 AER～アリア～", busy: [] },
+      { facilityId: "品川オフィス会議室", busy: [] },
+      { facilityId: "品川オフィス応接室", busy: [] },
+    ],
+    requiredFacilityLocations: ["アクト", "有玉", "品川"],
+    requiredFacilityQueries: ["アクト中会議室", "有玉大会議室", "品川の会議室"],
+  });
+  assert.deepEqual(slots[0]?.facilitiesByLocation, {
+    アクト: ["アクト中会議室"],
+    有玉: ["有玉大会議室 AER～アリア～"],
+    品川: ["品川オフィス会議室"],
+  });
+});
+
 describe("filterFutureAvailability", () => {
   it("omits past dates and already-started same-day slots", () => {
     const slots = [

@@ -66,6 +66,8 @@ export interface FindAvailabilityTask {
   facilityQuery?: string;
   /** Each location must have a separate free meeting room in the same slot. */
   requiredFacilityLocations?: string[];
+  /** Optional exact room query corresponding to each requested location. */
+  requiredFacilityQueries?: string[];
   title?: string;
   /** Offer up to five chronological choices, marking the first as earliest. */
   selectionMode?: "earliest";
@@ -93,7 +95,7 @@ export interface BookMeetingTask {
   excludePreviousFacility?: boolean;
   type: "book_meeting";
   facilityQuery?: string;
-  /** Two or more rooms selected from one verified multi-location slot. */
+  /** Two to ten rooms selected from one verified multi-location slot. */
   facilityQueries?: string[];
   title: string;
   sendEmail: boolean;

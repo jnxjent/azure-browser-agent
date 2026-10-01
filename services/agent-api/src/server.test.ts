@@ -72,6 +72,7 @@ it("extends an open-ended start until several candidates are found", () => {
 it("selects a numbered candidate with a WEB request without treating WEB as a room", () => {
   assert.equal(readNumberedCandidateSelection("では上記１で。WEB会議も設定して"), 1);
   assert.equal(readNumberedCandidateSelection("では、1で"), 1);
+  assert.equal(readNumberedCandidateSelection("1で確保して"), 1);
   assert.equal(readNumberedCandidateSelection("では候補の中の1で。"), 1);
   assert.equal(readNumberedCandidateSelection("では候補2で、Teams会議も作成して"), 2);
   assert.equal(readNumberedCandidateSelection("では1で。会議室はアクトで"), undefined);

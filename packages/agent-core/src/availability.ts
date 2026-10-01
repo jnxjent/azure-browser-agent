@@ -193,15 +193,30 @@ export function findBookableAvailability(
 
 /** Intersect people and one free meeting room at every requested location. */
 export function findMultiLocationAvailability(
-  request: BookableAvailabilityRequest & { requiredFacilityLocations: string[] },
+  request: BookableAvailabilityRequest & {
+    requiredFacilityLocations: string[];
+    requiredFacilityQueries?: string[];
+  },
 ): MultiLocationAvailabilitySlot[] {
   const locations = request.requiredFacilityLocations.map((location) => location.trim());
-  if (locations.length < 2 || new Set(locations.map(normalizeFacilityName)).size !== locations.length) {
-    throw new TypeError("At least two distinct facility locations are required.");
+  if (locations.length < 2 || locations.length > 10 ||
+      new Set(locations.map(normalizeFacilityName)).size !== locations.length) {
+    throw new TypeError("Between two and ten distinct facility locations are required.");
   }
-  const byLocation = locations.map((location) => ({
+  const queries = request.requiredFacilityQueries?.map((query) => query.trim());
+  if (queries !== undefined &&
+      (queries.length !== locations.length || queries.some((query) => query === ""))) {
+    throw new TypeError("requiredFacilityQueries must correspond to requiredFacilityLocations.");
+  }
+  const byLocation = locations.map((location, index) => ({
     location,
-    slots: findBookableAvailability({ ...request, facilityQuery: location }),
+    // findBookableAvailability uses normalized substring matching, so a user
+    // query such as "有玉大会議室" also matches the registered desknet's name
+    // "有玉大会議室 AER～アリア～".
+    slots: findBookableAvailability({
+      ...request,
+      facilityQuery: queries?.[index] ?? location,
+    }),
   }));
   const otherLocations = byLocation.slice(1);
   return (byLocation[0]?.slots ?? []).flatMap((first) => {
@@ -258,6 +273,17 @@ function matchesFacilityQuery(
   normalizedQuery: string,
 ): boolean {
   const normalizedFacilityId = normalizeFacilityName(facilityId);
+  const genericRoomAtLocation = normalizedQuery.match(/^(.+?)の(会議室|応接室)$/);
+  if (genericRoomAtLocation !== null) {
+    const [, requestedLocation, requestedType] = genericRoomAtLocation;
+    if (requestedLocation !== undefined && requestedType !== undefined &&
+        KNOWN_FACILITY_LOCATIONS.includes(requestedLocation)) {
+      const facilityLocation = KNOWN_FACILITY_LOCATIONS.find((location) =>
+        normalizedFacilityId.startsWith(location),
+      );
+      return facilityLocation === requestedLocation && normalizedFacilityId.includes(requestedType);
+    }
+  }
   if (KNOWN_FACILITY_LOCATIONS.includes(normalizedQuery)) {
     const facilityLocation = KNOWN_FACILITY_LOCATIONS.find((location) =>
       normalizedFacilityId.startsWith(location),

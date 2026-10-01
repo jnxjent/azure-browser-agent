@@ -564,6 +564,9 @@ async function executeAvailabilityRun(
           ...availabilityRequest,
           facilities: keepMeetingRoomFacilities(facilitySchedules, "meeting_room"),
           requiredFacilityLocations: task.requiredFacilityLocations,
+          ...(task.requiredFacilityQueries === undefined
+            ? {}
+            : { requiredFacilityQueries: task.requiredFacilityQueries }),
         }));
     availability.push(...filteredAvailability);
     if (task.requiredFacilityLocations !== undefined) {
@@ -601,6 +604,8 @@ async function executeAvailabilityRun(
       candidates.push(slot);
       perDate.set(date, (perDate.get(date) ?? 0) + 1);
     }
+    const requestedFacilityLabel = task.requiredFacilityQueries?.join("と") ??
+      task.requiredFacilityLocations.map((location) => `${location}の会議室`).join("と");
     const lines = candidates.map((slot, index) =>
       `${index + 1}. ${formatJapanDateTime(slot.start)}〜${formatJapanTime(slot.end)}　${task.requiredFacilityLocations!.map((location) =>
         `${location}: ${slot.facilitiesByLocation[location]?.[0] ?? "未確認"}`).join("／")}`,
@@ -610,8 +615,8 @@ async function executeAvailabilityRun(
       result: {
         summary: `Verified simultaneous participant and meeting-room availability at ${task.requiredFacilityLocations.join(" and ")}.`,
         assistantMessage: candidates.length === 0
-          ? `${task.date}〜${task.endDate}に、参加者全員と${task.requiredFacilityLocations.join("・")}の会議室が同時に${task.durationMinutes}分空いている候補はありませんでした。`
-          : `${task.date}〜${task.endDate}に、参加者全員と各拠点の会議室が同時に${task.durationMinutes}分空いている候補です。\n${lines.join("\n")}\n「候補1で」のように番号を指定するか、候補の行を貼り返してください。空き状況は変わるため、予約前に再確認してください。会議室の予約やWEB会議の作成は行っていません。`,
+          ? `${task.date}〜${task.endDate}のあなたの空いている時間の中で、${requestedFacilityLabel}のすべてが${task.durationMinutes}分空いている時間帯はありませんでした。`
+          : `${task.date}〜${task.endDate}のあなたの空いている時間の中で、${requestedFacilityLabel}のすべてが${task.durationMinutes}分空いている候補です。\n${lines.join("\n")}\n「候補1で」のように番号を指定するか、候補の行を貼り返してください。空き状況は変わるため、予約前に再確認してください。会議室の予約やWEB会議の作成は行っていません。`,
         evidence: [observationBefore.screenshotRef, observationAfter.screenshotRef],
         availability: candidates,
         multiLocationCandidateLines: lines,
@@ -699,7 +704,7 @@ async function executeMultiBookingRun(
   const slot = pending.availability.find(candidate =>
     candidate.start === task.selectedStart && candidate.end === task.selectedEnd &&
     facilities.every(room => candidate.availableFacilityIds.includes(room)));
-  if (!slot) throw new Error("指定した日時に２室が空いていません。候補を再検索してください。");
+  if (!slot) throw new Error("指定した日時にすべての会議室が空いていません。候補を再検索してください。");
   if (Date.parse(slot.start) <= Date.now()) throw new Error("開始時刻を過ぎました。候補を再検索してください。");
   const date = japanDateFromInstant(slot.start);
   signal.throwIfAborted();
@@ -712,12 +717,12 @@ async function executeMultiBookingRun(
   if (!nativeFacilityIds || nativeUserIds.length !== pending.participantIds.length ||
       new Set(nativeUserIds).size !== nativeUserIds.length ||
       nativeUserIds.some(id => !/^\d{1,20}$/.test(id))) {
-    throw new Error("２室または参加者の引き渡しIDを確認できません。候補を再検索してください。");
+    throw new Error("指定された会議室または参加者の引き渡しIDを確認できません。候補を再検索してください。");
   }
   signal.throwIfAborted();
   const observation = await observe(page, run.id, "before.png", artifactDirectory,
-    "Verified the unsaved form with all requested participants and both meeting rooms.",
-    ["Date and time", "Participants", "Both facilities", "Email notification"]);
+    "Verified the unsaved form with all requested participants and all requested meeting rooms.",
+    ["Date and time", "Participants", "All requested facilities", "Email notification"]);
   await bringPreparedFormToFront(page);
   const approvalRequest = {
     title: task.title,
@@ -738,8 +743,8 @@ async function executeMultiBookingRun(
     updatedAt: new Date().toISOString(),
     approval: { requestedAt: new Date().toISOString() },
     result: {
-      summary: "Prepared one DeskNet's form with two meeting rooms for manual registration.",
-      assistantMessage: "２室を設定した予定内容を確認してください。オレンジのボタンでDeskNet'sの予定追加画面を開き、２室が選択されていることを確認してから、DeskNet's上の「追加」を手動で押してください。まだ登録していません。",
+      summary: `Prepared one DeskNet's form with ${facilities.length} meeting rooms for manual registration.`,
+      assistantMessage: `${facilities.length}室を設定した予定内容を確認してください。オレンジのボタンでDeskNet'sの予定追加画面を開き、指定した会議室がすべて選択されていることを確認してから、DeskNet's上の「追加」を手動で押してください。まだ登録していません。`,
       evidence: [observation.screenshotRef],
       approvalRequest,
     },

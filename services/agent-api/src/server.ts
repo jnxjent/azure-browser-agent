@@ -64,7 +64,7 @@ import {
 } from "./web-meeting-service.js";
 import { loadSharedIntentConfiguration } from "./intent-configuration.js";
 import { parseFacilityOnlyAvailability } from "./facility-only-availability.js";
-import { readRequiredFacilityLocations } from "./multi-location-request.js";
+import { parseMultiRoomAvailability, readRequiredFacilityRequest } from "./multi-location-request.js";
 
 loadSharedIntentConfiguration();
 
@@ -163,7 +163,7 @@ const WEB_REQUEST_ONLY = /^(?:web|ウェブ|オンライン|teams|チームズ|�
 export function readNumberedCandidateSelection(prompt: string): number | undefined {
   const normalized = prompt.normalize("NFKC").trim();
   const match = normalized.match(
-    /^(?:では|それでは|じゃあ)?[、,\s]*(?:上記|候補(?:の中)?(?:の)?)?[、,\s]*(\d+)(?:番|番目)?(?:で|を選んで|にして)(?:お願いします)?[、,。.!！\s]*(.*)$/,
+    /^(?:では|それでは|じゃあ)?[、,\s]*(?:上記|候補(?:の中)?(?:の)?)?[、,\s]*(\d+)(?:番|番目)?(?:で|を選んで|にして)(?:(?:確保|予約)(?:して|してください|をお願いします)?)?(?:お願いします)?[、,。.!！\s]*(.*)$/,
   );
   if (match?.[1] === undefined) return undefined;
   const remainder = (match[2] ?? "").trim();
@@ -454,6 +454,21 @@ async function route(
       });
       return;
     }
+    if (validatedInput.site === "desknets") {
+      const multiRoomSearch = parseMultiRoomAvailability(validatedInput.prompt);
+      if (multiRoomSearch !== undefined) {
+        pendingMultiLocationCandidates.delete(conversationKey(validatedInput));
+        const multiRoomRun: BrowserRun = {
+          ...createRun({ ...validatedInput, mode: "read" }),
+          intentSource: "deterministic",
+          task: multiRoomSearch,
+        };
+        runs.set(multiRoomRun.id, multiRoomRun);
+        startRun(multiRoomRun.id);
+        sendJson(response, 202, multiRoomRun);
+        return;
+      }
+    }
     if (validatedInput.site === "desknets" && isWebMeetingEnabled()) {
       // "WEB希望" is kept as a condition only. Creating the Teams meeting is a
       // separate, explicit action taken after the date and time are settled, so
@@ -602,7 +617,7 @@ async function route(
       const facilityQueries = Object.values(slot.facilitiesByLocation).map(rooms => rooms[0]);
       if (facilityQueries.length < 2 || facilityQueries.some(room => room === undefined) ||
           new Set(facilityQueries).size !== facilityQueries.length) {
-        throw new TypeError("２拠点の会議室を特定できません。候補を再検索してください。");
+        throw new TypeError("指定された会議室をすべて特定できません。候補を再検索してください。");
       }
       const context = savedConversation?.context;
       if (context === undefined) throw new TypeError("参加者の空き時間が失われました。候補を再検索してください。");
@@ -940,10 +955,17 @@ async function route(
       if (task.type === "find_availability") {
         pendingMultiLocationCandidates.delete(conversationKey(validatedInput));
         task = inheritAvailabilityPreferences(task, conversation?.context, validatedInput.prompt);
-        const requiredFacilityLocations = readRequiredFacilityLocations(validatedInput.prompt);
-        if (requiredFacilityLocations !== undefined) {
+        const requiredFacility = readRequiredFacilityRequest(validatedInput.prompt);
+        if (requiredFacility !== undefined) {
           const { facilityQuery: _singleFacility, ...withoutSingleFacility } = task;
-          task = { ...withoutSingleFacility, requiredFacilityLocations, facilityType: "meeting_room" };
+          task = {
+            ...withoutSingleFacility,
+            requiredFacilityLocations: requiredFacility.locations,
+            ...(requiredFacility.queries === undefined
+              ? {}
+              : { requiredFacilityQueries: requiredFacility.queries }),
+            facilityType: "meeting_room",
+          };
         }
         pendingParticipantChoices.delete(conversationKey(validatedInput));
         task = configureAvailabilitySearch(task, validatedInput.prompt, conversation?.context);
@@ -1230,7 +1252,7 @@ async function route(
         const nativeFacilityIds = "nativeFacilityIds" in approval ? approval.nativeFacilityIds : undefined;
         if (approval.facilityIds !== undefined &&
             (nativeFacilityIds?.length !== approval.facilityIds.length || nativeFacilityIds[0] !== nativeFacilityId)) {
-          throw new Error("２室の引き渡し情報がありません。候補を選び直してください。");
+          throw new Error("指定された会議室すべての引き渡し情報がありません。候補を選び直してください。");
         }
         if (approval.facilityId && !nativeFacilityId) throw new Error("会議室の引き渡し情報がありません。候補を選び直してください。");
         const handoffUrl=buildDeskNetsHandoffUrl({start:approval.start,end:approval.end,userIds:approval.nativeUserIds,
