@@ -612,6 +612,20 @@ async function executeAvailabilityRun(
     }
     const requestedFacilityLabel = task.requiredFacilityQueries?.join("と") ??
       task.requiredFacilityLocations.map((location) => `${location}の会議室`).join("と");
+    const addedParticipant = task.candidateWindows?.length ? task.participants.at(-1)?.name : undefined;
+    const participantMention = addedParticipant === undefined ? undefined : (() => {
+      const mentionStart = run.input.prompt.indexOf(addedParticipant);
+      if (mentionStart < 0) return addedParticipant;
+      const suffix = run.input.prompt.slice(mentionStart + addedParticipant.length)
+        .match(/^(?:代表取締役|執行役員|取締役|副社長|本部長|支店長|副部長|副支店長|部長|次長|課長|室長|所長|係長|主任|専務|常務|マネージャー|リーダー)/)?.[0] ?? "";
+      return `${addedParticipant}${suffix}`;
+    })();
+    const candidateIntro = participantMention === undefined
+      ? `${task.date}〜${task.endDate}のあなたの空いている時間の中で、${requestedFacilityLabel}のすべてが${task.durationMinutes}分空いている候補です。`
+      : `確認したところ、上記候補枠の中で、${participantMention}が参加できる時間帯は以下です。`;
+    const noCandidateMessage = participantMention === undefined
+      ? `${task.date}〜${task.endDate}のあなたの空いている時間の中で、${requestedFacilityLabel}のすべてが${task.durationMinutes}分空いている時間帯はありませんでした。`
+      : `確認したところ、上記候補枠の中に、${participantMention}が参加できる時間帯はありませんでした。`;
     const lines = candidates.map((slot, index) =>
       `${index + 1}. ${formatJapanDateTime(slot.start)}〜${formatJapanTime(slot.end)}　${task.requiredFacilityLocations!.map((location) =>
         `${location}: ${slot.facilitiesByLocation[location]?.[0] ?? "未確認"}`).join("／")}`,
@@ -621,8 +635,8 @@ async function executeAvailabilityRun(
       result: {
         summary: `Verified simultaneous participant and meeting-room availability at ${task.requiredFacilityLocations.join(" and ")}.`,
         assistantMessage: candidates.length === 0
-          ? `${task.date}〜${task.endDate}のあなたの空いている時間の中で、${requestedFacilityLabel}のすべてが${task.durationMinutes}分空いている時間帯はありませんでした。`
-          : `${task.date}〜${task.endDate}のあなたの空いている時間の中で、${requestedFacilityLabel}のすべてが${task.durationMinutes}分空いている候補です。\n${lines.join("\n")}\n「候補1で」のように番号を指定するか、候補の行を貼り返してください。空き状況は変わるため、予約前に再確認してください。会議室の予約やWEB会議の作成は行っていません。`,
+          ? noCandidateMessage
+          : `${candidateIntro}\n${lines.join("\n")}\n「候補1で」のように番号を指定するか、候補の行を貼り返してください。空き状況は変わるため、予約前に再確認してください。会議室の予約やWEB会議の作成は行っていません。`,
         evidence: [observationBefore.screenshotRef, observationAfter.screenshotRef],
         availability: candidates,
         multiLocationCandidateLines: lines,
