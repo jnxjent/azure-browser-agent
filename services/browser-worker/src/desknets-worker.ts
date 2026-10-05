@@ -143,6 +143,7 @@ export class DeskNetsBrowserWorker implements RunExecutor {
         authentication = new DeskNetsAuthentication(page, await this.loadCredentials(), pageUrl.origin, signal);
         await authentication.attach();
       }
+      await authentication.recoverExpiredSessionWarning();
       await authentication.recoverLogin();
       const scheduleUrl = new URL(pageUrl);
       scheduleUrl.search = "?cmd=schindex";

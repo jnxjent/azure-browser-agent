@@ -30,6 +30,10 @@ async function fixture() {
       }
     }
     res.setHeader("Content-Type", "text/html; charset=utf-8");
+    if (mode === "expired" && new URL(req.url ?? "/", "http://fixture.invalid").searchParams.get("cmd") === "schadd") {
+      res.end('<input class="jsch-startdate" value="2026/10/05"><div class="ui-widget-overlay"></div><div class="ui-dialog"><div>警告</div><div>要求された処理にアクセスできません。権限の変更が発生したかセッションが切れた可能性があります。作業を中断し、最初からやり直してください。</div><button>閉じる</button></div><input type="button" value="キャンセル">');
+      return;
+    }
     if (req.headers.cookie?.includes("session=ok")) {
       res.end('<div>氏名/組織名</div><button>追加</button>'); return;
     }
@@ -68,6 +72,32 @@ test("BASIC and app login recover; a later cookie expiry can recover again", asy
     assert.equal(f.stats.login,2);
     assert.equal(f.stats.registrations,0);
   } finally {await browser.close();await f.close();}
+});
+
+test("expired-session warning abandons the stale form and then permits saved-login recovery", async () => {
+  const f = await fixture();
+  f.mode("expired");
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    const auth = new DeskNetsAuthentication(page, f.lease, f.origin, new AbortController().signal);
+    try {
+      await auth.attach();
+      await page.goto(`${f.origin}/dneo.cgi?cmd=schadd#cmd=schadd`);
+      assert.equal(await page.locator(".ui-widget-overlay").count(), 1);
+      assert.equal(await auth.recoverExpiredSessionWarning(), true);
+      assert.equal(new URL(page.url()).searchParams.get("cmd"), "schindex");
+      assert.equal(await page.locator(".jsch-startdate").count(), 0);
+      assert.equal(await auth.recoverLogin(), true);
+      assert.equal(await page.getByText("氏名/組織名").count(), 1);
+      assert.equal(f.stats.login, 1);
+    } finally {
+      await auth.dispose();
+    }
+  } finally {
+    await browser.close();
+    await f.close();
+  }
 });
 
 test("separate personal contexts can pass the shared BASIC entrance concurrently", async () => {

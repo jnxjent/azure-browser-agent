@@ -11,6 +11,9 @@ export function isHttpAuthError(error: unknown): boolean {
   return error instanceof Error && /ERR_(?:INVALID|MISSING)_AUTH_CREDENTIALS/.test(error.message);
 }
 
+const EXPIRED_SESSION_WARNING =
+  "要求された処理にアクセスできません。権限の変更が発生したかセッションが切れた可能性があります。作業を中断し、最初からやり直してください。";
+
 /** Attaches only for a worker operation; never changes the user's Edge profile. */
 export class DeskNetsAuthentication {
   private static basicSubmissionTail: Promise<void> = Promise.resolve();
@@ -133,6 +136,28 @@ export class DeskNetsAuthentication {
         await username.fill("", { timeout: 1000 }).catch(() => {});
       }
     }
+  }
+
+  async recoverExpiredSessionWarning(): Promise<boolean> {
+    this.signal.throwIfAborted();
+    const warning = this.page.locator(".ui-dialog:visible").filter({
+      hasText: EXPIRED_SESSION_WARNING,
+    });
+    if (await warning.count() !== 1) return false;
+
+    // Leave the stale, unsaved form by navigation. Clicking its Cancel button
+    // is impossible while the modal overlay is active, and registration must
+    // never be used as a cleanup mechanism.
+    const schedule = new URL(this.page.url());
+    if (schedule.origin !== this.origin) throw new DeskNetsAuthenticationError();
+    schedule.search = "?cmd=schindex";
+    schedule.hash = "cmd=schweekgrp";
+    await this.page.goto(schedule.href, {
+      waitUntil: "domcontentloaded",
+      timeout: 15_000,
+    });
+    this.signal.throwIfAborted();
+    return true;
   }
 
   assertHealthy(): void { if (this.httpFailed) throw new DeskNetsAuthenticationError("DeskNet's入口のBASIC認証に失敗しました。認証情報を更新してください。"); }
