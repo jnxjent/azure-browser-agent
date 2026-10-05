@@ -137,6 +137,20 @@ export class DeskNetsBrowserWorker implements RunExecutor {
         await authentication.attach();
         await page.goto(startUrl, { waitUntil: "domcontentloaded" });
       }
+      if (run.approval?.approvedAt === undefined) {
+        // Keep the dedicated browser minimized during background work. The
+        // explicit handoff restores it after the user presses the orange button.
+        const windowSession = await page.context().newCDPSession(page);
+        try {
+          const { windowId } = await windowSession.send("Browser.getWindowForTarget");
+          await windowSession.send("Browser.setWindowBounds", {
+            windowId,
+            bounds: { windowState: "minimized" },
+          });
+        } finally {
+          await windowSession.detach();
+        }
+      }
       const pageUrl = new URL(page.url());
       assertActionAllowed({ type: "open_page", url: pageUrl.href }, this.limits);
       if (!authentication) {
@@ -272,8 +286,9 @@ export class DeskNetsBrowserWorker implements RunExecutor {
         "--remote-debugging-address=127.0.0.1",
         `--remote-debugging-port=${endpoint.port || "80"}`,
         `--user-data-dir=${profile}`,
+        "--start-minimized",
         startUrl,
-      ], { detached: true, stdio: "ignore", windowsHide: false });
+      ], { detached: true, stdio: "ignore", windowsHide: true });
       let startupError: Error | undefined;
       edge.on("error", (cause) => { startupError = cause; });
       edge.unref();
@@ -748,7 +763,6 @@ async function executeMultiBookingRun(
   const observation = await observe(page, run.id, "before.png", artifactDirectory,
     "Verified the unsaved form with all requested participants and all requested meeting rooms.",
     ["Date and time", "Participants", "All requested facilities", "Email notification"]);
-  await bringPreparedFormToFront(page);
   const approvalRequest = {
     title: task.title,
     start: slot.start,
@@ -927,7 +941,6 @@ async function executeBookingRun(
     `Prepared ${task.title === "" ? "an editable blank agenda" : task.title}, ${formatJapanDateTime(slot.start)}-${formatJapanTime(slot.end)}, ${facilityId}, with email notification ${task.sendEmail ? "enabled" : "disabled"} and self-notification suppression disabled.`,
     ["Meeting title", "Date and time", "Participants", "Facility", "Email notification"],
   );
-  await bringPreparedFormToFront(page);
   const preparationAction: BrowserAction = {
     type: "type_text",
     target: "予定フォーム",

@@ -40,6 +40,5 @@ export async function ensureSingleDeskNetsTab(
   for (const { page } of states) {
     if (page !== retained) await page.close({ runBeforeUnload: false });
   }
-  await retained.bringToFront();
   return retained;
 }

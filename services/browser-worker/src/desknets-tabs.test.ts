@@ -11,7 +11,7 @@ function fixture(routes: string[]) {
     context: () => context,
     locator: () => ({ count: async () => 0 }),
     close: async function () { this.closed = true; },
-    bringToFront: async () => {},
+    bringToFront: async () => { throw new Error("Background tab cleanup must not activate the browser."); },
   }));
   const browser = { contexts: () => [context] } as unknown as Browser;
   return { browser, pages };
