@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { BookableAvailabilitySlot, FindAvailabilityTask } from "@azure-browser-agent/agent-core";
-import { createRun } from "@azure-browser-agent/agent-core";
+import { createRun, validateCreateRunInput } from "@azure-browser-agent/agent-core";
 import {
+  applyProfileFacilityDefault,
   buildShowCandidatesResponse,
   buildParticipantCandidateRefinement,
   configureAvailabilitySearch,
@@ -40,6 +41,28 @@ import {
   resolveTimeOnlySelection,
   type PendingBookingConversation,
 } from "./server.js";
+
+describe("profile room defaults", () => {
+  it("validates the default room request field", () => {
+    const input = { userId: "profile-user", prompt: "日程を調整して", site: "desknets", defaultFacilityQuery: "品川" };
+    assert.equal(validateCreateRunInput(input).defaultFacilityQuery, "品川");
+    assert.throws(() => validateCreateRunInput({ ...input, defaultFacilityQuery: 123 }), TypeError);
+    assert.throws(() => validateCreateRunInput({ ...input, defaultFacilityQuery: "x".repeat(121) }), TypeError);
+  });
+  const task: FindAvailabilityTask = { type: "find_availability", participants: [], date: "2026-10-08", endDate: "2026-10-09", durationMinutes: 60 };
+  it("uses the requesting user's profile for a new search", () => {
+    assert.equal((applyProfileFacilityDefault(task, "品川") as FindAvailabilityTask).facilityQuery, "品川");
+    assert.equal((applyProfileFacilityDefault(task, "有玉") as FindAvailabilityTask).facilityQuery, "有玉");
+    assert.equal(applyProfileFacilityDefault(task), task);
+  });
+  it("preserves explicit rooms, ongoing rooms, and multiple locations", () => {
+    const explicit = { ...task, facilityQuery: "有玉" };
+    assert.equal(applyProfileFacilityDefault(explicit, "品川"), explicit);
+    assert.equal(applyProfileFacilityDefault(task, "品川", "アクト"), task);
+    const multi = { ...task, requiredFacilityLocations: ["アクト", "有玉"] };
+    assert.equal(applyProfileFacilityDefault(multi, "品川"), multi);
+  });
+});
 
 it("refines only the displayed candidates when another participant is added", () => {
   const candidates: BookableAvailabilitySlot[] = [

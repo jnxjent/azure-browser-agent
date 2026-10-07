@@ -38,6 +38,7 @@ export interface RunStep {
 }
 
 export interface CreateRunInput {
+  defaultFacilityQuery?: string;
   conversationHistory?: Array<{ role: "user" | "assistant"; content: string }>;
   userId: string;
   threadId: string;

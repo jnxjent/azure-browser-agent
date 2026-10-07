@@ -37,7 +37,12 @@ export function validateCreateRunInput(value: unknown): CreateRunInput {
     (message) => !isRecord(message) || !["user", "assistant"].includes(String(message.role)) ||
       typeof message.content !== "string" || message.content.length > 12000,
   ))) throw new TypeError("conversationHistory must contain at most 100 user/assistant messages.");
+  const defaultFacilityQuery = readOptionalString(value, "defaultFacilityQuery");
+  if (defaultFacilityQuery !== undefined && defaultFacilityQuery.length > 120) {
+    throw new TypeError("defaultFacilityQuery must be at most 120 characters.");
+  }
   return { userId, threadId, site, prompt, mode,
+    ...(defaultFacilityQuery === undefined ? {} : { defaultFacilityQuery }),
     ...(history === undefined ? {} : { conversationHistory: history as NonNullable<CreateRunInput["conversationHistory"]> }),
   };
 }

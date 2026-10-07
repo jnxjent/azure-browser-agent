@@ -934,6 +934,9 @@ async function route(
             },
           });
       let task = analysis.task;
+      // A profile default scopes a new search, but never replaces a room already
+      // specified in the request or selected in the ongoing conversation.
+      task = applyProfileFacilityDefault(task, validatedInput.defaultFacilityQuery, conversation?.context.facilityQuery);
       if ("facilityQuery" in task && task.facilityQuery !== undefined) {
         const parsedFacility = parseFlexibleFacilityQuery(task.facilityQuery);
         const facilityQuery = parsedFacility?.query ?? task.facilityQuery;
@@ -1146,7 +1149,7 @@ async function route(
                 conversation.context.userDisplayName,
                 FACILITY_PREFERENCE_OVERRIDE_BY_USER,
                 FACILITY_PREFERENCE_BY_ORGANIZATION,
-                savedPreferences?.facilities,
+                validatedInput.defaultFacilityQuery === undefined ? savedPreferences?.facilities : [validatedInput.defaultFacilityQuery],
               )?.facilityId ?? (() => {
                 throw new TypeError("優先順位に一致する空き会議室がありません。");
               })()
@@ -2085,6 +2088,12 @@ const ORGANIZATION_SUFFIX_PATTERN = new RegExp(`${ORGANIZATION_SUFFIX}$`);
 function inferFacilityTokenFromOrganization(organization: string): string | undefined {
   const token = organization.replace(ORGANIZATION_SUFFIX_PATTERN, "").trim();
   return token === "" || token === organization ? undefined : token;
+}
+
+export function applyProfileFacilityDefault(task: DeskNetsTask, preferred?: string, conversationFacility?: string): DeskNetsTask {
+  if (task.type !== "find_availability" || task.requiredFacilityLocations !== undefined ||
+      task.facilityQuery !== undefined || conversationFacility !== undefined || preferred === undefined) return task;
+  return { ...task, facilityQuery: preferred };
 }
 
 function computeFacilityPreferences(
