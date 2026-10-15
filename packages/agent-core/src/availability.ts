@@ -14,6 +14,9 @@ export interface FacilitySchedule {
 }
 
 export interface CommonAvailabilityRequest {
+  bufferBeforeMinutes?: number;
+  bufferAfterMinutes?: number;
+
   window: TimeInterval;
   durationMinutes: number;
   incrementMinutes?: number;
@@ -102,12 +105,20 @@ export function findCommonAvailability(
     throw new TypeError("participantId values must be unique.");
   }
 
+  const readBuffer = (value: number | undefined): number => {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0 || value > 1440))
+      throw new TypeError("Schedule buffers must be integers between 0 and 1440 minutes.");
+    return (value ?? 0) * MINUTE_MS;
+  };
+  const beforeMs = readBuffer(request.bufferBeforeMinutes);
+  const afterMs = readBuffer(request.bufferAfterMinutes);
   const busyByParticipant = request.schedules.map((schedule) =>
     mergeIntervals(
       schedule.busy
         .map((interval, index) =>
           parseInterval(interval, `${schedule.participantId}.busy[${index}]`),
         )
+        .map(interval => ({ start: interval.start - afterMs, end: interval.end + beforeMs }))
         .filter(
           (interval) => interval.end > window.start && interval.start < window.end,
         )

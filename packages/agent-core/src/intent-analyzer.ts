@@ -2,6 +2,7 @@ import type { DeskNetsTask } from "./contracts.js";
 import { normalizeParticipantName, parseDeskNetsTask, readRequesterMembership, type RequesterMembership } from "./desknets-intent.js";
 
 export interface IntentAnalysis {
+  schedulingBuffer?: { beforeMinutes: number | null; afterMinutes: number | null };
   failureKind?: string;
   taskValidationFailed?: boolean;
   membershipClarificationTask?: Extract<DeskNetsTask, { type: "find_availability" }>;
@@ -32,6 +33,8 @@ interface StructuredParticipant {
 }
 
 interface StructuredIntent {
+  bufferBeforeMinutes?: number | null;
+  bufferAfterMinutes?: number | null;
   intent: "find_availability" | "change_availability_duration" | "find_facility_availability" | "select_booking_candidate" | "set_email_notification" | "show_candidates" | "book_meeting" | "clarify";
   question?: string | null;
   excludePreviousFacility?: boolean;
@@ -81,6 +84,14 @@ export async function analyzeDeskNetsIntent(
       (confirmation ? pendingQuestion : Array.from(quote).length >= 3);
     const requesterMembership = (modelMembership === "include" || modelMembership === "exclude") && !evidenceValid
       ? "unchanged" : modelMembership;
+    const readBuffer = (value: number | null | undefined): number | null => {
+      if (value == null) return null;
+      if (!Number.isSafeInteger(value) || value < 0 || value > 1440) throw new TypeError("Invalid scheduling buffer.");
+      return value;
+    };
+    const beforeMinutes = readBuffer(structured.bufferBeforeMinutes);
+    const afterMinutes = readBuffer(structured.bufferAfterMinutes);
+    const schedulingBuffer = beforeMinutes !== null || afterMinutes !== null ? { beforeMinutes, afterMinutes } : undefined;
     let task: DeskNetsTask;
     let taskValidationFailed = false;
     try { task = validateStructuredIntent(structured, requesterMembership, prompt); }
@@ -103,6 +114,7 @@ export async function analyzeDeskNetsIntent(
         ? { ...task, ...(requesterMembership === "include" ? { excludeRequester: false }
           : requesterMembership === "exclude" ? { excludeRequester: true } : {}) }
         : task,
+      ...(schedulingBuffer ? { schedulingBuffer } : {}),
       source: "azure_openai",
       requesterMembership, requesterMembershipEvidence: evidence, requesterMembershipEvidenceValid: evidenceValid,
       ...(taskValidationFailed ? { taskValidationFailed: true } : {}),
@@ -178,6 +190,7 @@ async function requestStructuredIntent(
             "Choose selectionMode=earliest whenever the user wants the soonest possible meeting, regardless of phrasing; otherwise list. For choosing a numbered candidate, resolve its start/end from saved candidates and return book_meeting directly with sendEmail=true unless previously disabled. When participants change, return find_availability to recheck everyone.",
             "If essential participant or time information is truly ambiguous, use clarify and ask ONLY for that missing information; never restart the conversation or invent people/dates. If no live availability exists, first return find_availability using participants/dates recovered from dialogue.",
             "The explicit card-button action only authorizes displaying the prepared desknet's form. Conversation confirmations never authorize registration, and the user must click desknet's own Add button manually.",
+            "bufferBeforeMinutes and bufferAfterMinutes describe ONLY explicit buffer changes in latestUserMessage; otherwise null. They mean free participant time before/after the NEW meeting, never duration or room reservation. Leaving N minutes after the previous appointment or reserving setup time before this meeting means before=N. Leaving N minutes until the next appointment means after=N. Both sides means both=N. Removing buffers means both=0. Interpret natural Japanese corrections and short replies using dialogue. If direction is genuinely ambiguous use clarify. Never invent minutes. Buffer corrections return find_availability with saved conditions, never book an old candidate even with a simultaneous number selection.",
             "Analyze a Japanese desknet's scheduling request into the supplied JSON schema.",
             `Current instant: ${now.toISOString()}. Calendar timezone: Asia/Tokyo.`,
             "Resolve 今日, 明日, N週間以内, 今週, 来週, 今月中, and explicit ranges to inclusive YYYY-MM-DD dates.",
@@ -247,6 +260,8 @@ function validateStructuredIntent(value: StructuredIntent, membership: Requester
     return {
       type: "find_availability",
       ...(value.selectionMode === "earliest" ? { selectionMode: "earliest" as const } : {}),
+      ...(value.bufferBeforeMinutes == null ? {} : { bufferBeforeMinutes: value.bufferBeforeMinutes }),
+      ...(value.bufferAfterMinutes == null ? {} : { bufferAfterMinutes: value.bufferAfterMinutes }),
       participants,
       date,
       endDate,
@@ -352,6 +367,8 @@ const INTENT_SCHEMA = {
   type: "object",
   properties: {
     intent: { type: "string", enum: ["find_availability", "change_availability_duration", "find_facility_availability", "select_booking_candidate", "set_email_notification", "show_candidates", "book_meeting", "clarify"] },
+    bufferBeforeMinutes: { type: ["integer", "null"] },
+    bufferAfterMinutes: { type: ["integer", "null"] },
     question: nullableString,
     excludePreviousFacility: { type: "boolean" },
     selectionMode: { type: ["string", "null"], enum: ["earliest", "list", null] },
@@ -376,6 +393,6 @@ const INTENT_SCHEMA = {
     requesterMembershipEvidence: { type: ["string", "null"] },
     requesterMembership: { type: "string", enum: ["include", "exclude", "unchanged", "unclear"] },
   },
-  required: ["intent", "participants", "dateStart", "dateEnd", "durationMinutes", "facilityQuery", "candidateNumber", "sendEmail", "title", "selectedStart", "selectedEnd", "question", "excludePreviousFacility", "selectionMode", "requesterMembership", "requesterMembershipEvidence"],
+  required: ["bufferBeforeMinutes", "bufferAfterMinutes", "intent", "participants", "dateStart", "dateEnd", "durationMinutes", "facilityQuery", "candidateNumber", "sendEmail", "title", "selectedStart", "selectedEnd", "question", "excludePreviousFacility", "selectionMode", "requesterMembership", "requesterMembershipEvidence"],
   additionalProperties: false,
 } as const;

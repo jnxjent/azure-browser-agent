@@ -583,13 +583,17 @@ async function executeAvailabilityRun(
     }
     await cancelVisibleDialog(page, "利用設備");
 
+    const gcd = (a: number, b: number): number => b === 0 ? a : gcd(b, a % b);
+    const increment = gcd(gcd(30, task.bufferBeforeMinutes ?? 0), task.bufferAfterMinutes ?? 0);
     const availabilityRequest = {
+      bufferBeforeMinutes: task.bufferBeforeMinutes ?? 0,
+      bufferAfterMinutes: task.bufferAfterMinutes ?? 0,
       window: {
         start: `${date}T${task.windowStart && task.windowStart > meetingHours.start ? task.windowStart : meetingHours.start}:00+09:00`,
         end: `${date}T${task.windowEnd && task.windowEnd < meetingHours.end ? task.windowEnd : meetingHours.end}:00+09:00`,
       },
       durationMinutes: task.durationMinutes,
-      incrementMinutes: 30,
+      incrementMinutes: increment,
       // 代理予約では登録者自身の予定は制約にしない。
       schedules: excludedRequesterId === undefined
         ? participantSchedules
@@ -689,6 +693,8 @@ async function executeAvailabilityRun(
           date: task.date,
           endDate: task.endDate,
           durationMinutes: task.durationMinutes,
+          bufferBeforeMinutes: task.bufferBeforeMinutes ?? 0,
+          bufferAfterMinutes: task.bufferAfterMinutes ?? 0,
           participants: task.participants,
           ...(task.windowStart === undefined ? {} : { windowStart: task.windowStart }),
           ...(task.windowEnd === undefined ? {} : { windowEnd: task.windowEnd }),
@@ -711,6 +717,8 @@ async function executeAvailabilityRun(
     date: task.date,
     endDate: task.endDate,
     durationMinutes: task.durationMinutes,
+    bufferBeforeMinutes: task.bufferBeforeMinutes ?? 0,
+    bufferAfterMinutes: task.bufferAfterMinutes ?? 0,
     participants: task.participants,
     ...(task.windowStart === undefined ? {} : { windowStart: task.windowStart }),
     ...(task.windowEnd === undefined ? {} : { windowEnd: task.windowEnd }),
@@ -1839,6 +1847,7 @@ function formatJapanDateTime(value: string): string {
     timeZone: "Asia/Tokyo",
     month: "numeric",
     day: "numeric",
+    weekday: "short",
   }).format(new Date(value));
   return `${date} ${formatJapanTime(value)}`;
 }

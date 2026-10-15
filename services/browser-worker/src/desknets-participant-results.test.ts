@@ -220,8 +220,8 @@ test("room-only results number every candidate and retain the selected room and 
     end: new Date(Date.parse(start) + 3600000).toISOString(), durationMinutes: 60,
     participantIds: [], availableFacilityIds: ["アクト応接室"] }));
   const result = buildRoomAvailabilityResult(task, slots, ["本人"], []);
-  assert.match(result.assistantMessage!, /1\. 9\/16 09:00〜10:00/);
-  assert.match(result.assistantMessage!, /2\. 9\/17 09:00〜10:00/);
+  assert.match(result.assistantMessage!, /1\. 9\/16\(水\) 09:00〜10:00/);
+  assert.match(result.assistantMessage!, /2\. 9\/17\(木\) 09:00〜10:00/);
   assert.deepEqual(result.pendingBooking?.availability, slots);
   assert.deepEqual(result.pendingBooking?.participantIds, ["本人"]);
   assert.deepEqual(result.pendingBooking?.participants, []);

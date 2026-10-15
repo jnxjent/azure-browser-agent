@@ -447,3 +447,20 @@ describe("findBookableAvailability", () => {
     );
   });
 });
+
+ it("applies participant buffers without extending meeting or room reservation", () => {
+   const request = {
+     window: {start:"2099-01-01T09:00:00Z",end:"2099-01-01T14:00:00Z"},
+     durationMinutes:60, incrementMinutes:15,
+     schedules:[{participantId:"target",busy:[{start:"2099-01-01T08:00:00Z",end:"2099-01-01T09:00:00Z"},
+       {start:"2099-01-01T12:00:00Z",end:"2099-01-01T13:00:00Z"}]}],
+     facilities:[{facilityId:"room",busy:[{start:"2099-01-01T09:00:00Z",end:"2099-01-01T09:15:00Z"}]}],
+   };
+   const slots = findBookableAvailability({...request,bufferBeforeMinutes:15,bufferAfterMinutes:30});
+   assert.equal(slots[0]?.start,"2099-01-01T09:15:00.000Z");
+   assert.equal(slots[0]?.end,"2099-01-01T10:15:00.000Z");
+   assert.ok(!slots.some(s => s.start === "2099-01-01T11:00:00.000Z"));
+   assert.ok(slots.some(s => s.start === "2099-01-01T10:30:00.000Z"));
+   assert.throws(() => findCommonAvailability({...request,bufferBeforeMinutes:-1}));
+   assert.deepEqual(findCommonAvailability({...request,bufferBeforeMinutes:0,bufferAfterMinutes:0}),findCommonAvailability(request));
+ });

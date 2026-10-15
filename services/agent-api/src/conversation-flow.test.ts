@@ -681,8 +681,8 @@ test("room-only search → candidate number or pasted time → confirmation card
   }
   try {
     const found = await send("2099年9月16日にアクト応接室を60分利用できる空き時間を教えて");
-    assert.match(found.result?.assistantMessage ?? "", /1\. 9\/16 09:00/);
-    assert.match(found.result?.assistantMessage ?? "", /2\. 9\/16 10:00/);
+    assert.match(found.result?.assistantMessage ?? "", /1\. 9\/16\(水\) 09:00/);
+    assert.match(found.result?.assistantMessage ?? "", /2\. 9\/16\(水\) 10:00/);
     const numbered = await send("候補1で");
     assert.equal(numbered.status, "awaiting_approval", JSON.stringify(numbered));
     assert.equal(Date.parse(numbered.result!.approvalRequest!.start), Date.parse("2099-09-16T00:00:00Z"));
@@ -857,5 +857,166 @@ test("membership confirmation resumes a new request even without prior state or 
     globalThis.fetch=originalFetch; DeskNetsBrowserWorker.prototype.execute=originalWorker;
     server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));
     keys.forEach((key,index)=>{if(savedEnv[index]===undefined)delete process.env[key];else process.env[key]=savedEnv[index];});
+  }
+});
+
+test("buffer correction refreshes candidates and invalidates old cards", async () => {
+  const aliasDirectory = await mkdtemp(join(tmpdir(), "president-alias-flow-"));
+  const envKeys = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_DEPLOYMENT", "DESKNETS_WEB_MEETING_ENABLED", "DESKNETS_PARTICIPANT_ALIASES_PATH"];
+  const originalEnv = envKeys.map(key => process.env[key]);
+  const originalFetch = globalThis.fetch;
+  const originalWorker = DeskNetsBrowserWorker.prototype.execute;
+  process.env.AZURE_OPENAI_ENDPOINT = "https://buffer-card.example";
+  process.env.AZURE_OPENAI_API_KEY = "mock-key";
+  process.env.AZURE_OPENAI_DEPLOYMENT = "mock-intent";
+  process.env.DESKNETS_WEB_MEETING_ENABLED = "false";
+  process.env.DESKNETS_PARTICIPANT_ALIASES_PATH = join(aliasDirectory, "aliases.json");
+  let modelCalls = 0;
+  let invalidConditions = false;
+  let modeledBuffer: number | null = null;
+  let modeledMembership: "include" | "exclude" | "unchanged" | "unclear" = "unchanged";
+  globalThis.fetch = async (input, init) => {
+    if (!String(input).startsWith("https://buffer-card.example")) return originalFetch(input, init);
+    if (++modelCalls > 1) {
+      const latest = JSON.parse(JSON.parse(String(init?.body)).messages.at(-1).content);
+      if (["はい", "いいえ"].includes(latest.latestUserMessage)) assert.equal(latest.savedSchedulingState.conversation.requesterMembershipQuestion, true);
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+        intent: invalidConditions || /候補を出し直して|応接室の空きを/.test(latest.latestUserMessage) ? "find_availability" : latest.latestUserMessage.startsWith("候補1で") ? "select_booking_candidate" : "show_candidates",
+        bufferBeforeMinutes: modeledBuffer, bufferAfterMinutes: null,
+        candidateNumber: 1,
+        participants: invalidConditions ? [] : [{name:"加藤恵子", organization:null}], dateStart:invalidConditions ? null : "2099-09-16",dateEnd:"2099-09-22",
+        durationMinutes:60,facilityQuery:"アクト応接室",title:"相談",
+        requesterMembership: modeledMembership,
+        requesterMembershipEvidence: modeledMembership === "unchanged" ? null : JSON.parse(JSON.parse(String(init?.body)).messages.at(-1).content).latestUserMessage,
+      }) } }] }), { status: 200 });
+    }
+    assert.match(String(init?.body), /加藤恵子/);
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ intent: "find_availability",
+      participants: [{ name: "加藤恵子", organization: null }], dateStart: "2099-09-16", dateEnd: "2099-09-22",
+      durationMinutes: 60, facilityQuery: "アクト応接室", title: "相談", excludeRequester: false }) } }] }), { status: 200 });
+  };
+  let searches = 0;
+  DeskNetsBrowserWorker.prototype.execute = async (run: BrowserRun) => {
+    if (run.task?.type === "find_availability") {
+      searches++;
+      assert.deepEqual(run.task.participants, [{ name: "加藤恵子" }]);
+      assert.equal(run.task.date, "2099-09-16"); assert.equal(run.task.endDate, "2099-09-22");
+      assert.equal(run.task.durationMinutes, 60); assert.equal(run.task.facilityQuery, "アクト応接室");
+      assert.equal(run.task.title, "相談");
+      if (modeledBuffer !== null) assert.equal(run.task.bufferBeforeMinutes, modeledBuffer);
+      assert.equal(run.task.candidateWindows, undefined, "rescan the original period, not only the old candidates");
+      const participantIds = run.task.excludeRequester ? ["加藤恵子"] : ["本人", "加藤恵子"];
+      const hours = run.task.excludeRequester ? [0, 1] : [1];
+      const availability = hours.map(hour => ({ start: `2099-09-16T0${hour}:00:00.000Z`, end: `2099-09-16T0${hour + 1}:00:00.000Z`,
+        durationMinutes: 60, participantIds, availableFacilityIds: ["アクト応接室"] }));
+      return { ...run, status: "completed", result: { summary: "searched", assistantMessage: "1. 9/16 09:00〜10:00", evidence: [], availability,
+        pendingBooking: { ...run.task, participantIds, availability, allFacilityAvailability: availability,
+          ...(run.task.excludeRequester ? { excludedRequesterId: "本人" } : {}) } } };
+    }
+    assert.equal(run.task?.type, "book_meeting");
+    if (run.task?.type !== "book_meeting") throw new Error("Unexpected task");
+    assert.equal(run.approval?.approvedAt, undefined);
+    return { ...run, status: "awaiting_user_input", result: { summary: "prepared only", evidence: [], manualActionRequest: {
+      title: run.task.title, start: run.task.selectedStart!, end: run.task.selectedEnd!, facilityId: "アクト応接室",
+      participantIds: run.context!.participantIds, emailNotificationWillBeSent: run.task.sendEmail, selfNotificationSuppressed: false } } };
+  };
+  const { server } = await import("./server.js");
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}/browser-agent/runs`;
+  async function send(prompt: string): Promise<BrowserRun> {
+    const response = await fetch(base, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: "buffer-card", threadId: "buffer-card", site: "desknets", mode: "read", prompt }) });
+    let run = await response.json() as BrowserRun; assert.equal(response.status, 202, JSON.stringify(run));
+    for (let i = 0; ["queued", "running"].includes(run.status) && i < 100; i++) {
+      await new Promise(resolve => setTimeout(resolve, 5)); run = await (await fetch(`${base}/${run.id}`)).json() as BrowserRun;
+    }
+    return run;
+  }
+  try {
+    const aliasResponse = await fetch(`http://127.0.0.1:${address.port}/browser-agent/participant-aliases`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ alias: "加藤社長", formalName: "加藤恵子" }),
+    });
+    assert.ok(aliasResponse.ok);
+    await send("今週、加藤社長の空いている日程を教えて。時間は１時間。場所は、アクト応接室");
+    const firstCard = await send("1で");
+    assert.deepEqual(firstCard.result?.manualActionRequest?.participantIds, ["本人", "加藤恵子"]);
+    modeledMembership = "include";
+    const unchangedCard = await send("候補1で。私も参加します");
+    assert.equal(searches, 1, "already-included requester must keep the selected candidate");
+    assert.deepEqual(unchangedCard.result?.manualActionRequest?.participantIds, ["本人", "加藤恵子"]);
+    modeledMembership = "exclude";
+    const refreshed = await send("私は会議に参加しないので、除外してください。再び候補をください。");
+    assert.equal(refreshed.status, "completed", JSON.stringify(refreshed));
+    assert.match(refreshed.result?.assistantMessage ?? "", /あなたを除外/);
+    assert.equal(refreshed.result?.availability?.length, 2, "removing the requester can introduce new slots");
+    assert.equal((await (await fetch(`${base}/${firstCard.id}`)).json() as BrowserRun).status, "cancelled");
+    const secondCard = await send("1で");
+    assert.equal(secondCard.status, "awaiting_user_input", JSON.stringify(secondCard));
+    assert.deepEqual(secondCard.result?.manualActionRequest?.participantIds, ["加藤恵子"]);
+    assert.ok(Date.parse(secondCard.result!.manualActionRequest!.start) < Date.parse(firstCard.result!.manualActionRequest!.start));
+    const unable = await send("私は参加できないので、候補を出し直して");
+    assert.equal(searches, 3, "even an already excluded requester gets a fresh search for a definite exclusion");
+    assert.deepEqual(unable.result?.availability?.[0]?.participantIds, ["加藤恵子"]);
+    modeledMembership = "unclear";
+    const unclear = await send("私は参加できないかもしれない。候補を見せて");
+    assert.equal(unclear.status, "awaiting_user_input");
+    assert.equal(unclear.result?.assistantMessage, "ご自身を参加者から外しますか？");
+    modeledMembership = "exclude";
+    await send("はい");
+    assert.equal(searches, 4);
+    assert.deepEqual((await send("1で")).result?.manualActionRequest?.participantIds, ["加藤恵子"]);
+    modeledMembership = "unchanged";
+    await send("鈴木さんは参加できないので外して。候補を見せて");
+    assert.equal(searches, 4);
+    await send("私も参加します");
+    assert.equal(searches, 4, "regex inclusion must not override unchanged from the LLM");
+    assert.deepEqual((await send("1で")).result?.manualActionRequest?.participantIds, ["加藤恵子"]);
+    modeledMembership = "include";
+    await send("私も参加します");
+    const thirdCard = await send("1で");
+    assert.deepEqual(thirdCard.result?.manualActionRequest?.participantIds, ["本人", "加藤恵子"]);
+    assert.equal(searches, 5);
+    modeledMembership = "exclude";
+    invalidConditions = true;
+    const semanticExclusion = await send("私は今回は同席を見送ります。候補を見せて");
+    invalidConditions = false;
+    assert.equal(semanticExclusion.intentSource, "azure_openai", "invalid task fields must not replace LLM membership with regex");
+    assert.equal((await (await fetch(`${base}/${thirdCard.id}`)).json() as BrowserRun).status, "cancelled");
+    assert.equal(searches, 6, "show_candidates plus semantic exclusion must become a fresh search");
+    assert.deepEqual(semanticExclusion.result?.availability?.[0]?.participantIds, ["加藤恵子"]);
+    assert.deepEqual((await send("1で")).result?.manualActionRequest?.participantIds, ["加藤恵子"]);
+    modeledMembership = "include";
+    await send("私も入れて");
+    assert.equal(searches, 7);
+    assert.deepEqual((await send("1で")).result?.manualActionRequest?.participantIds, ["本人", "加藤恵子"]);
+    modeledBuffer = 30;
+    const oldCard = await send("1で");
+    const buffered = await send("やはり前の打ち合わせの終了時間から30分余裕をもたせて");
+    assert.equal(buffered.task?.type, "find_availability");
+    assert.equal(searches, 8);
+    assert.equal((await (await fetch(`${base}/${oldCard.id}`)).json() as BrowserRun).status,"cancelled");
+    assert.ok((await send("1で")).result?.manualActionRequest);
+    modeledBuffer = 15;
+    await send("候補1で。ただ会議前の準備を15分空けて");
+    assert.equal(searches, 9, "buffer correction supersedes candidate selection");
+    assert.ok((await send("1で")).result?.manualActionRequest);
+    modeledBuffer = null;
+    modeledMembership = "unclear";
+    await send("参加できないかもしれない");
+    assert.equal(searches, 9);
+    modeledMembership = "exclude";
+    await send("はい");
+    assert.equal(searches, 10);
+    assert.deepEqual((await send("1で")).result?.manualActionRequest?.participantIds, ["加藤恵子"]);
+    await send("私は不参加です。アクト応接室の空きを調べて");
+    assert.equal(searches, 11, "room-only shortcuts must not swallow a membership correction");
+    assert.equal(modelCalls, 16, "the preliminary room interpretation is reused, not requested twice");
+  } finally {
+    globalThis.fetch = originalFetch; DeskNetsBrowserWorker.prototype.execute = originalWorker;
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    envKeys.forEach((key, index) => { if (originalEnv[index] === undefined) delete process.env[key]; else process.env[key] = originalEnv[index]; });
+    await rm(aliasDirectory, { recursive: true, force: true });
   }
 });

@@ -482,7 +482,7 @@ async function route(
         });
       }
       const canUseRoomShortcut = !pendingRequesterMembership.has(conversationKey(validatedInput)) &&
-        (preliminaryAnalysis === undefined || (!preliminaryAnalysis.taskValidationFailed && preliminaryAnalysis.requesterMembership === "unchanged"));
+        (preliminaryAnalysis === undefined || (!preliminaryAnalysis.schedulingBuffer && !preliminaryAnalysis.taskValidationFailed && preliminaryAnalysis.requesterMembership === "unchanged"));
       if (multiRoomSearch !== undefined && canUseRoomShortcut) {
         pendingMultiLocationCandidates.delete(conversationKey(validatedInput));
         const multiRoomRun: BrowserRun = {
@@ -815,6 +815,22 @@ async function route(
       delete savedConversation.requesterMembershipQuestion;
       pendingRequesterMembership.delete(conversationKey(validatedInput));
     }
+    if (semanticAnalysis?.schedulingBuffer && savedConversation && (semanticAnalysis.task.type !== "clarify" || semanticAnalysis.taskValidationFailed)) {
+      const saved = savedConversation.context;
+      const { beforeMinutes, afterMinutes } = semanticAnalysis.schedulingBuffer;
+      semanticAnalysis = { ...semanticAnalysis, task: {
+        type: "find_availability", participants: saved.participants ?? [],
+        date: saved.date, endDate: saved.endDate ?? saved.date, durationMinutes: saved.durationMinutes,
+        ...Object.fromEntries(Object.entries({ facilityQuery: saved.facilityQuery, requiredFacilityLocations: saved.requiredFacilityLocations,
+        requiredFacilityQueries: saved.requiredFacilityQueries, windowStart: saved.windowStart, windowEnd: saved.windowEnd,
+        title: saved.title, excludeRequester: saved.excludeRequester, selectionMode: saved.selectionMode, autoExtendSearch: saved.autoExtendSearch, facilityType: saved.facilityType }).filter(([, value]) => value !== undefined)),
+        bufferBeforeMinutes: beforeMinutes ?? saved.bufferBeforeMinutes ?? 0,
+        bufferAfterMinutes: afterMinutes ?? saved.bufferAfterMinutes ?? 0,
+      } };
+      cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId, true);
+      pendingBookings.delete(conversationKey(validatedInput));
+      pendingMultiLocationCandidates.delete(conversationKey(validatedInput));
+    }
     const membershipChangesSaved = savedConversation !== undefined &&
       ((semanticAnalysis?.requesterMembership === "exclude" && !savedConversation.context.excludeRequester) ||
        (semanticAnalysis?.requesterMembership === "include" && savedConversation.context.excludeRequester));
@@ -828,7 +844,7 @@ async function route(
       return;
     }
     // A room-only optimization is safe only after the LLM kept membership.
-    const interpretedRoomChange = semanticAnalysis?.requesterMembership === "unchanged"
+    const interpretedRoomChange = !semanticAnalysis?.schedulingBuffer && semanticAnalysis?.requesterMembership === "unchanged"
       ? buildRoomOnlyChangeTask(validatedInput.prompt, savedConversation) : undefined;
     if (interpretedRoomChange && savedConversation) {
       cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId);
@@ -1771,6 +1787,7 @@ function formatJapanInstant(value: string): string {
     timeZone: "Asia/Tokyo",
     month: "numeric",
     day: "numeric",
+    weekday: "short",
     hour: "2-digit",
     minute: "2-digit",
     hourCycle: "h23",
@@ -2458,6 +2475,10 @@ export function inheritAvailabilityPreferences(
     ...(task.facilityType === undefined && previous.facilityType !== undefined &&
       (task.facilityQuery === undefined || task.facilityQuery === previous.facilityQuery)
       ? { facilityType: previous.facilityType } : {}),
+    ...(sameParticipantNames(task.participants, previous.participants) ? {
+      bufferBeforeMinutes: task.bufferBeforeMinutes ?? previous.bufferBeforeMinutes ?? 0,
+      bufferAfterMinutes: task.bufferAfterMinutes ?? previous.bufferAfterMinutes ?? 0,
+    } : {}),
     ...(previous.selectionMode === "earliest" && readDurationMinutes(prompt) !== undefined
       ? { selectionMode: "earliest" as const } : {}),
     // 代理予約の指定は、同じ参加者での条件変更なら、本人が参加すると明言するまで引き継ぐ。
@@ -3027,6 +3048,7 @@ function formatJapanSlot(slot: { start: string; end: string }): string {
     timeZone: "Asia/Tokyo",
     month: "numeric",
     day: "numeric",
+    weekday: "short",
   }).format(new Date(slot.start));
   const time = new Intl.DateTimeFormat("ja-JP", {
     timeZone: "Asia/Tokyo",

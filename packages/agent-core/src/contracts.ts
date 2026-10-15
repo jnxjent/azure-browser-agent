@@ -55,6 +55,9 @@ export interface ParticipantSelector {
 }
 
 export interface FindAvailabilityTask {
+  bufferBeforeMinutes?: number;
+  bufferAfterMinutes?: number;
+
   facilityType?: "meeting_room" | "reception_room" | "any";
   type: "find_availability";
   participants: ParticipantSelector[];
@@ -187,6 +190,9 @@ export interface PendingParticipantChoice {
 }
 
 export interface PendingBookingContext {
+  bufferBeforeMinutes?: number;
+  bufferAfterMinutes?: number;
+
   facilityType?: "meeting_room" | "reception_room" | "any";
   windowStart?: string;
   windowEnd?: string;

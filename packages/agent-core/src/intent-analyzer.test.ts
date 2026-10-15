@@ -330,3 +330,14 @@ describe("LLM-primary requester membership", () => {
     } finally { console.info = original; }
   });
 });
+
+it("keeps LLM buffer corrections independently of candidate classification", async () => {
+ for (const minutes of [0,15,30,45]) {
+  const result = await analyzeDeskNetsIntent("やはり前の予定から余裕をもたせて",new Date(),{config,
+   fetchImplementation:async()=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({
+    intent:"show_candidates",requesterMembership:"unchanged",bufferBeforeMinutes:minutes,bufferAfterMinutes:null
+   })}}]}))});
+  assert.equal(result.source,"azure_openai");
+  assert.deepEqual(result.schedulingBuffer,{beforeMinutes:minutes,afterMinutes:null});
+ }
+});
