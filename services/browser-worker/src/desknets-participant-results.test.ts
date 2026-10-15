@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium } from "playwright";
 import { participantResultsBaseline, participantResultsTable } from "./desknets-participant-results.js";
-import { retainCandidateWindows, selectParticipant } from "./desknets-worker.js";
+import { retainCandidateWindows, selectParticipant, buildRoomAvailabilityResult, cardParticipants, verifyExcludedRegistrationParticipants } from "./desknets-worker.js";
 
 test("participant refinement retains only the previously displayed time windows", () => {
   const slots = [
@@ -12,6 +12,7 @@ test("participant refinement retains only the previously displayed time windows"
   assert.deepEqual(retainCandidateWindows(slots, [slots[1]!]), [slots[1]]);
   assert.equal(retainCandidateWindows(slots, undefined), slots);
 });
+
 
 test("participant search ignores hidden duplicate listings and handles first/repeated search", async () => {
   const browser = await chromium.launch({ headless: true });
@@ -44,6 +45,7 @@ test("participant search ignores hidden duplicate listings and handles first/rep
     await assert.rejects(table.waitFor({state:'visible',timeout:1000}), /strict mode violation/);
   } finally { await browser.close(); }
 });
+
 
 test("participant search maps 高田 to 髙田 and retries when zero results hide the table", async () => {
   const browser = await chromium.launch({ headless: true });
@@ -83,6 +85,7 @@ test("participant search maps 高田 to 髙田 and retries when zero results hid
   } finally { await browser.close(); }
 });
 
+
 test("a unique exact full name wins over an approximate department and prefix matches", async () => {
   const browser = await chromium.launch({ headless: true });
   try {
@@ -109,6 +112,7 @@ test("a unique exact full name wins over an approximate department and prefix ma
     assert.equal(await page.locator("button[data-selected='true']").locator("../..").locator(".co-sel-name").innerText(), "鈴木清彦");
   } finally { await browser.close(); }
 });
+
 
 test("duplicate exact full names still require disambiguation", async () => {
   const browser = await chromium.launch({ headless: true });
@@ -138,6 +142,7 @@ test("duplicate exact full names still require disambiguation", async () => {
     assert.equal(await page.locator("button[data-selected='true']").count(), 0);
   } finally { await browser.close(); }
 });
+
 
 test("a surname with an unmatched department offers the actual people instead of failing", async () => {
   const browser = await chromium.launch({ headless: true });
@@ -175,4 +180,64 @@ test("a surname with an unmatched department offers the actual people instead of
     );
     assert.equal(await page.locator("button").count(), 2);
   } finally { await browser.close(); }
+});
+
+test("excluded-participant verification waits for the dialog and asynchronously loaded rows", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    const fixture = async (names: string[]) => {
+      await page.setContent(`<a href="#" id="open" class="jsch-entry-target-chooser">登録先</a>
+        <div class="ui-dialog co-sel-dialog" hidden><div class="co-sel-bottom"><table><tbody></tbody></table></div><button onclick="this.parentElement.hidden=true">OK</button></div>`);
+      await page.evaluate(values => {
+        document.querySelector('#open')!.addEventListener('click', event => {
+          event.preventDefault();
+          setTimeout(() => { (document.querySelector('.co-sel-dialog') as HTMLElement).hidden = false; }, 150);
+          setTimeout(() => {
+            for (const name of values) {
+              const row = document.createElement('tr'); const cell = document.createElement('td');
+              cell.className = 'name-text'; cell.textContent = name; row.append(cell); document.querySelector('tbody')!.append(row);
+            }
+          }, 1100);
+        });
+      }, names);
+    };
+    await fixture(["加藤恵子"]);
+    await verifyExcludedRegistrationParticipants(page, ["加藤恵子"]);
+    assert.equal(await page.locator('.co-sel-dialog:visible').count(), 0);
+    await fixture(["野元潤一", "加藤恵子"]);
+    await assert.rejects(verifyExcludedRegistrationParticipants(page, ["加藤恵子"]), /一致しません/);
+    await fixture(["鈴木", "加藤恵子"]);
+    await verifyExcludedRegistrationParticipants(page, ["加藤恵子", "鈴木"]);
+  } finally { await browser.close(); }
+});
+
+
+test("room-only results number every candidate and retain the selected room and registration target", () => {
+  const task = { type: "find_room_availability" as const, facilityQuery: "アクト応接室",
+    date: "2099-09-16", endDate: "2099-09-17", durationMinutes: 60, windowStart: "09:00", windowEnd: "17:00" };
+  const slots = ["2099-09-16T00:00:00Z", "2099-09-17T00:00:00Z"].map(start => ({ start,
+    end: new Date(Date.parse(start) + 3600000).toISOString(), durationMinutes: 60,
+    participantIds: [], availableFacilityIds: ["アクト応接室"] }));
+  const result = buildRoomAvailabilityResult(task, slots, ["本人"], []);
+  assert.match(result.assistantMessage!, /1\. 9\/16 09:00〜10:00/);
+  assert.match(result.assistantMessage!, /2\. 9\/17 09:00〜10:00/);
+  assert.deepEqual(result.pendingBooking?.availability, slots);
+  assert.deepEqual(result.pendingBooking?.participantIds, ["本人"]);
+  assert.deepEqual(result.pendingBooking?.participants, []);
+  assert.equal(result.pendingBooking?.facilityQuery, "アクト応接室");
+  assert.match(buildRoomAvailabilityResult(task, [], [], []).assistantMessage!, /確認できませんでした/);
+});
+
+
+test("proxy booking omits only the requester from card participants and handoff IDs", () => {
+  const base = { date: "2099-09-21", durationMinutes: 30, availability: [], participantIds: ["秘書", "田中", "鈴木"] };
+  assert.deepEqual(
+    cardParticipants({ ...base, excludeRequester: true, excludedRequesterId: "秘書" }, ["101", "201", "301"]),
+    { participantIds: ["田中", "鈴木"], nativeUserIds: ["201", "301"] },
+  );
+  // Default: the requester stays on the card.
+  assert.deepEqual(cardParticipants(base, ["101", "201", "301"]), { participantIds: ["秘書", "田中", "鈴木"], nativeUserIds: ["101", "201", "301"] });
+  // Missing native IDs stay missing.
+  assert.deepEqual(cardParticipants({ ...base, excludedRequesterId: "秘書" }), { participantIds: ["田中", "鈴木"] });
 });

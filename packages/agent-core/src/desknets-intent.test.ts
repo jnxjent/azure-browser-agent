@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseDeskNetsTask, readDurationMinutes } from "./desknets-intent.js";
+import { parseDeskNetsTask, readDurationMinutes, requestsRequesterExclusion, requestsRequesterInclusion } from "./desknets-intent.js";
 
 describe("readDurationMinutes", () => {
   it("distinguishes clock minutes from meeting duration", () => {
@@ -605,4 +605,72 @@ describe("parseDeskNetsTask", () => {
       /参加者名が重複しています/,
     );
   });
+});
+
+describe("requester exclusion (代理予約)", () => {
+  it("never mistakes inability for attendance and accepts short affirmative corrections", () => {
+    for (const prompt of ["私は参加できないので、候補を出し直して", "私は参加できません", "私は参加できず欠席します", "私は参加不可です", "私は今回は参加しないので候補をもう一度", "私は明日の会議には参加しない", "私は欠席するので除外して", "私は欠席なので再検索して", "私は行かないので外して", "私は出なくていいので候補をください"]) {
+      assert.equal(requestsRequesterExclusion(prompt), true, prompt);
+      assert.equal(requestsRequesterInclusion(prompt), false, prompt);
+    }
+    for (const prompt of ["私も参加で", "私も参加。", "私も入れて", "私も会議に参加します。候補をください"]) {
+      assert.equal(requestsRequesterInclusion(prompt), true, prompt);
+      assert.equal(requestsRequesterExclusion(prompt), false, prompt);
+    }
+    for (const prompt of ["私は参加できないかもしれない", "私は参加するかもしれない", "私は参加するとは言っていない", "私を入れてはいけない", "鈴木さんは参加できないので外して"]) {
+      assert.equal(requestsRequesterInclusion(prompt), false, prompt);
+      assert.equal(requestsRequesterExclusion(prompt), false, prompt);
+    }
+  });
+  it("keeps the named president as a person rather than part of the name", () => {
+    const task = parseDeskNetsTask("今週、加藤社長の空いている日程を教えて。時間は１時間。場所は、アクト応接室", new Date("2026-10-15T08:00:00+09:00"));
+    assert.equal(task.type, "find_availability");
+    if (task.type === "find_availability") assert.deepEqual(task.participants, [{ name: "加藤" }]);
+  });
+  it("excludes the requester only for explicit others-only or self-exclusion wording", () => {
+    for (const prompt of [
+      "田中社長のスケジュールのみ勘案して来週30分空いている時間",
+      "田中社長のみで来週の空き時間を探して",
+      "鈴木さんだけで明日空いている時間",
+      "鈴木さんと明日空いている時間。私は参加しない",
+      "私は除いて鈴木さんと明日空いている時間",
+      "私抜きで鈴木さんと田中さんの空き時間",
+      "田中社長の予定を代理で取って",
+      "私は会議に参加しないので、除外してください。再び候補をください。",
+      "私は今回の打ち合わせには出席しません",
+      "田中さんと来週の空きを探して。対象者のみ考慮して",
+      "田中さんと来週の空きを探して。対象者のみ勘案して",
+      "田中さんと来週の空きを探して。対象者のみのスケジュールにして",
+      "田中さんと来週の空きを探して。私の予定は考慮しないで",
+      "田中さんと来週の空きを探して。私は参加しません",
+    ]) assert.equal(requestsRequesterExclusion(prompt), true, prompt);
+    for (const prompt of [
+      "鈴木さんと明日空いている時間",
+      "鈴木さんと田中さんの来週の空き時間を30分だけ",
+      "鈴木さんと午前のみで空いている時間",
+      "会議室はアクトのみで鈴木さんと明日",
+      "私も参加して鈴木さんと明日",
+      "私は会議に参加します",
+      "部長だけでなく課長も参加します",
+      "田中社長のみならず鈴木部長も",
+      "田中さんだけではなく鈴木さんも含めて",
+      "田中さんだけじゃなく鈴木さんも含めて",
+    ]) assert.equal(requestsRequesterExclusion(prompt), false, prompt);
+  });
+
+  it("sets the flag in the deterministic fallback parser", () => {
+    const now = new Date("2026-08-06T10:00:00+09:00");
+    const task = parseDeskNetsTask("鈴木さんだけで明日空いている時間", now);
+    assert.equal(task.type, "find_availability");
+    assert.equal(task.type === "find_availability" && task.excludeRequester, true);
+    const normal = parseDeskNetsTask("鈴木さんと明日空いている時間", now);
+    assert.equal(normal.type === "find_availability" && normal.excludeRequester, undefined);
+  });
+});
+
+it("does not exclude the requester for negation or explicit attendance", () => {
+ for (const prompt of ["私は除かないで、田中さんと予定を探して", "田中さんの代わりに私が参加する", "田中社長のみ。ただし私も参加します", "社長のみならず私も参加する"]) {
+  assert.equal(requestsRequesterExclusion(prompt),false,prompt);
+ }
+ assert.equal(requestsRequesterExclusion("私は参加しない。田中さんのみ"),true);
 });

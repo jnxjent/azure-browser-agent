@@ -21,11 +21,14 @@ export function parseFacilityOnlyAvailability(
   const text = prompt.normalize("NFKC");
   if (!/(?:会議室|応接室|ルーム)/.test(text) || !/(?:空き|空いて|使える|予約でき|確保でき|利用でき)/.test(text)) return undefined;
   // A named participant changes the meaning to a joint people-and-room search.
-  if (/(?:さん|部長|次長|課長|参加者|出席者|私と|自分と)/.test(text)) return undefined;
+  if (/(?:さん|様|社長|会長|専務|常務|取締役|役員|本部長|支店長|部長|次長|課長|室長|所長|係長|対象者|参加者|出席者|私と|自分と)/.test(text)) return undefined;
   const preferred = preferredFacility?.normalize("NFKC").trim();
   const rawFacility = text.match(/(?:^|[、。\sで])([^\s、。で]{2,24}?(?:会議室|応接室|ルーム[A-Z]?))(?=を|が|で|に|の|$)/)?.[1]
     ?? (preferred && /(?:会議室|応接室|ルーム)/.test(preferred) ? preferred : undefined);
   if (!rawFacility || !/(?:会議室|応接室|ルーム)/.test(rawFacility)) return undefined;
+  // A date immediately before the room name is a search condition, not part
+  // of the equipment's name (e.g. 「10月15日にアクト応接室」).
+  const facilityQuery = rawFacility.replace(/^(?:(?:20\d{2}年)?\d{1,2}月\d{1,2}日)(?:以降|から)?(?:に|の|は)?/, "").trim();
 
   const today = japanDate(now);
   const dateMatch = text.match(/(?:(20\d{2})年)?(\d{1,2})月(\d{1,2})日/);
@@ -54,7 +57,7 @@ export function parseFacilityOnlyAvailability(
   }
   return {
     type: "find_room_availability",
-    facilityQuery: rawFacility,
+    facilityQuery,
     date,
     endDate: addDays(date, 6),
     durationMinutes,

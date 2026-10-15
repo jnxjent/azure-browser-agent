@@ -172,7 +172,7 @@ describe("analyzeDeskNetsIntent", () => {
     });
   });
 
-  it("falls back to the deterministic parser when Azure OpenAI returns duplicate participants", async () => {
+  it("asks for valid scheduling conditions without switching to regex when participants are duplicated", async () => {
     const fetchImplementation: typeof fetch = async () =>
       new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
         intent: "find_availability",
@@ -191,14 +191,9 @@ describe("analyzeDeskNetsIntent", () => {
         selectedEnd: null,
       }) } }] }), { status: 200, headers: { "Content-Type": "application/json" } });
     const result = await analyzeDeskNetsIntent("山本さんと今日空いている時間", new Date("2026-08-06T16:00:00+09:00"), { config, fetchImplementation });
-    assert.equal(result.source, "deterministic");
-    assert.deepEqual(result.task, {
-      type: "find_availability",
-      participants: [{ name: "山本" }],
-      date: "2026-08-06",
-      endDate: "2026-08-06",
-      durationMinutes: 60,
-    });
+    assert.equal(result.source, "azure_openai");
+    assert.equal(result.task.type, "clarify");
+    assert.equal(result.taskValidationFailed, true);
   });
 
   it("falls back deterministically when Azure OpenAI is unavailable", async () => {
@@ -210,5 +205,128 @@ describe("analyzeDeskNetsIntent", () => {
       assert.equal(result.task.date, "2026-08-06");
       assert.equal(result.task.endDate, "2026-08-31");
     }
+  });
+});
+
+describe("LLM-primary requester membership", () => {
+  const now = new Date("2026-10-15T01:00:00Z");
+  const respond = (membership: string, evidence: string | null, intent = "show_candidates"): typeof fetch => async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    const schema = body.response_format.json_schema.schema;
+    assert.ok(schema.required.includes("requesterMembershipEvidence"));
+    assert.ok(!("excludeRequester" in schema.properties));
+    assert.ok(schema.properties.requesterMembership.enum.includes("unclear"));
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      intent, requesterMembership: membership, requesterMembershipEvidence: evidence,
+      participants: [{name: "田中", organization: null}], dateStart: "2026-10-15", dateEnd: "2026-10-16",
+      durationMinutes: 60, facilityQuery: null, candidateNumber: null, sendEmail: null, title: null,
+      selectedStart: null, selectedEnd: null, question: null, excludePreviousFacility: false, selectionMode: null,
+    }) } }] }), {status: 200});
+  };
+  it("keeps grounded exclusion even when classified as candidate redisplay", async () => {
+    const result = await analyzeDeskNetsIntent("私は会議に参加しないので、候補をください", now, {
+      config, fetchImplementation: respond("exclude", "私は会議に参加しない"),
+    });
+    assert.equal(result.requesterMembership, "exclude");
+    assert.equal(result.task.type, "show_candidates");
+    assert.equal(result.requesterMembershipEvidenceValid, true);
+  });
+  it("rejects missing, empty, whitespace-only, invented and history-only evidence", async () => {
+    for (const membership of ["include", "exclude"]) for (const evidence of [null, "", "  ", "私は参加します"]) {
+      const result = await analyzeDeskNetsIntent("候補を見せて", now, {
+        config, conversationHistory: [{role: "user", content: "私は参加します"}],
+        fetchImplementation: respond(membership, evidence),
+      });
+      assert.equal(result.requesterMembership, "unchanged");
+      assert.equal(result.requesterMembershipEvidenceValid, false);
+    }
+  });
+  it("accepts affirmative inclusion and normalizes width and whitespace in evidence", async () => {
+    const result = await analyzeDeskNetsIntent("私も 参加します。候補１で", now, {
+      config, fetchImplementation: respond("include", "私も参加します。候補1で"),
+    });
+    assert.equal(result.requesterMembership, "include");
+  });
+  it("never overrides a valid LLM decision with regex interpretation", async () => {
+    for (const prompt of ["私は参加しません", "私は参加できないかもしれない", "鈴木さんは参加できないので外して"]) {
+      const result = await analyzeDeskNetsIntent(prompt, now, {config, fetchImplementation: respond("unchanged", null)});
+      assert.equal(result.requesterMembership, "unchanged");
+    }
+    const semantic = await analyzeDeskNetsIntent("今回は同席を見送ります", now, {
+      config, fetchImplementation: respond("exclude", "同席を見送ります"),
+    });
+    assert.equal(semantic.requesterMembership, "exclude");
+    const include = await analyzeDeskNetsIntent("代理で調整します。私も同席するつもりです", now, {
+      config, fetchImplementation: respond("include", "私も同席するつもりです"),
+    });
+    assert.equal(include.requesterMembership, "include");
+  });
+  it("preserves unclear without choosing attendance", async () => {
+    const result = await analyzeDeskNetsIntent("参加できないかもしれない", now, {
+      config, fetchImplementation: respond("unclear", "参加できないかもしれない"),
+    });
+    assert.equal(result.requesterMembership, "unclear");
+  });
+  it("falls back to regex on an LLM outage, including membership-only followups", async () => {
+    const result = await analyzeDeskNetsIntent("私は参加できないので、候補を出し直して", now, {
+      config, requireLlm: true, fetchImplementation: async () => { throw new Error("offline"); },
+    });
+    assert.equal(result.source, "deterministic");
+    assert.equal(result.requesterMembership, "exclude");
+  });
+  it("permits requester-only attendance without putting self in participants", async () => {
+    const result = await analyzeDeskNetsIntent("田中さんの代わりに私が参加する", now, {
+      config, fetchImplementation: async () => new Response(JSON.stringify({choices: [{message: {content: JSON.stringify({
+        intent: "find_availability", participants: [], dateStart: "2026-10-15", dateEnd: "2026-10-16",
+        durationMinutes: 60, facilityQuery: null, title: null,
+        requesterMembership: "include", requesterMembershipEvidence: "私が参加する",
+      })}}]})),
+    });
+    assert.equal(result.source, "azure_openai");
+    assert.equal(result.requesterMembership, "include");
+    assert.deepEqual(result.task.type === "find_availability" && result.task.participants, []);
+  });
+  it("keeps grounded membership when unrelated scheduling fields are invalid", async () => {
+    const result = await analyzeDeskNetsIntent("今回は同席を見送ります", now, {
+      config, fetchImplementation: async () => new Response(JSON.stringify({choices: [{message: {content: JSON.stringify({
+        intent: "find_availability", participants: [], dateStart: null,
+        requesterMembership: "exclude", requesterMembershipEvidence: "今回は同席を見送ります",
+      })}}]})),
+    });
+    assert.equal(result.source, "azure_openai");
+    assert.equal(result.requesterMembership, "exclude");
+    assert.equal(result.taskValidationFailed, true);
+  });
+  it("rejects short generic evidence and yes/no outside a membership confirmation", async () => {
+    for (const evidence of ["私", "私は", "参加", "はい", "いいえ", "はい、お願いします"]) {
+      const result = await analyzeDeskNetsIntent("私も参加。はい、お願いします。いいえ", now, {
+        config, fetchImplementation: respond("exclude", evidence),
+      });
+      assert.equal(result.requesterMembership, "unchanged", evidence);
+    }
+    const confirmed = await analyzeDeskNetsIntent("はい", now, {
+      config, conversationState: { requesterMembershipQuestion: true }, fetchImplementation: respond("exclude", "はい"),
+    });
+    assert.equal(confirmed.requesterMembership, "exclude");
+  });
+  it("accepts the meaningful three-character quote 私抜き", async () => {
+    const result = await analyzeDeskNetsIntent("私抜きで候補を探して", now, {
+      config, fetchImplementation: respond("exclude", "私抜き"),
+    });
+    assert.equal(result.requesterMembership, "exclude");
+    assert.equal(result.requesterMembershipEvidenceValid, true);
+  });
+  it("does not emit participant names in membership audit logs", async () => {
+    const logs: unknown[][] = [];
+    const original = console.info;
+    console.info = (...values: unknown[]) => { logs.push(values); };
+    try {
+      await analyzeDeskNetsIntent("田中社長のスケジュールのみ勘案して", now, {
+        config, fetchImplementation: respond("exclude", "田中社長のスケジュールのみ勘案して"),
+      });
+      const log = JSON.stringify(logs);
+      assert.ok(!log.includes("田中"));
+      for (const field of ["llmValue", "evidence", "evidenceValid", "regexValue", "final", "source"]) assert.ok(log.includes(field));
+    } finally { console.info = original; }
   });
 });

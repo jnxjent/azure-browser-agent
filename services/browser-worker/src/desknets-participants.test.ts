@@ -1,3 +1,5 @@
+import { chromium } from "playwright";
+import { removeRequesterFromRegistration } from "./desknets-participants.js";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { resolveSelfOrganizationParticipants, preferParticipantOrganization, participantNameSearchVariants } from "./desknets-participants.js";
@@ -34,7 +36,7 @@ describe("resolveSelfOrganizationParticipants", () => {
         [{ name: "甲斐", organization: "当部" }],
         undefined,
       ),
-      /所属部署をDeskNet'sから取得できない/,
+      /所属部署をdesknet'sから取得できない/,
     );
   });
 });
@@ -68,4 +70,27 @@ it("excludes official company holidays including weekdays, without assuming ever
     { date: "20260923", label: "会議" },
     { date: "invalid", label: "会社休日" },
   ])], ["2026-09-19", "2026-09-21", "2026-09-22"]);
+});
+
+it("removes only the verified requester and refuses ambiguous or unsupported controls", async () => {
+ const browser = await chromium.launch({headless:true});
+ try {
+  const page = await browser.newPage();
+  const row = (name:string, button=true) => `<tr><td class="name-text">${name}</td><td>${button ? '<button onclick="this.closest(\'tr\').remove()">削除</button>' : ''}</td></tr>`;
+  const fixture = async (rows:string) => page.setContent(`<div class="co-sel-dialog"><div class="co-sel-bottom"><table><tbody>${rows}</tbody></table></div></div>`);
+  await fixture(row("田中社長")+row("秘書")+row("鈴木"));
+  assert.equal(await removeRequesterFromRegistration(page,"秘書"),"秘書");
+  assert.deepEqual(await page.locator(".name-text").allTextContents(),["田中社長","鈴木"]);
+  await assert.rejects(removeRequesterFromRegistration(page,undefined),/表示名/);
+  await assert.rejects(removeRequesterFromRegistration(page,"不明"),/一意/);
+  await fixture(row("秘書")+row("秘書"));
+  await assert.rejects(removeRequesterFromRegistration(page,"秘書"),/一意/);
+  assert.equal(await page.locator("tr").count(),2);
+  await fixture(`<tr><th><a href="#" title="選択を解除" class="co-sel-icon remove-item" onclick="event.preventDefault();this.closest('tr').remove()">x</a><a class="name-text" data-refid="user186">秘書</a></th></tr>` + row("田中社長"));
+  assert.equal(await removeRequesterFromRegistration(page,"秘書"), "秘書");
+  assert.deepEqual(await page.locator(".name-text").allTextContents(), ["田中社長"]);
+  await fixture(row("秘書",false)+row("田中社長"));
+  await assert.rejects(removeRequesterFromRegistration(page,"秘書"),/削除ボタン/);
+  assert.equal(await page.locator("tr").count(),2);
+ } finally {await browser.close();}
 });

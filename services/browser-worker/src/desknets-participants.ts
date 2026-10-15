@@ -1,3 +1,4 @@
+import type { Page } from "playwright";
 import type { ParticipantSelector } from "@azure-browser-agent/agent-core";
 
 const SELF_ORGANIZATION_REFERENCES = new Set([
@@ -30,7 +31,7 @@ export function resolveSelfOrganizationParticipants(
   const organization = currentUserOrganization?.normalize("NFKC").trim();
   if (!organization) {
     throw new Error(
-      "ログインユーザーの所属部署をDeskNet'sから取得できないため、「当部」の参加者を特定できません。正式な部署名を指定してください。",
+      "ログインユーザーの所属部署をdesknet'sから取得できないため、「当部」の参加者を特定できません。正式な部署名を指定してください。",
     );
   }
 
@@ -64,4 +65,26 @@ export function participantNameSearchVariants(name: string): string[] {
   if (name.startsWith("高田")) return [`髙田${name.slice(2)}`, name];
   if (name.startsWith("髙田")) return [name, `高田${name.slice(2)}`];
   return [name];
+}
+
+/** Remove only a uniquely identified requester using the UI's explicit remove control. */
+export async function removeRequesterFromRegistration(page: Page, displayName: string | undefined): Promise<string> {
+  if (!displayName?.trim()) throw new Error("登録者の表示名を確認できないため、本人を除外できません。再検索してください。");
+  const dialog = page.locator(".co-sel-dialog:visible");
+  const rows = dialog.locator(".co-sel-bottom table tbody tr");
+  const names = await rows.evaluateAll(elements => elements.map(row => row.querySelector(".name-text")?.textContent?.trim() ?? ""));
+  const indices = names.flatMap((name, index) => name === displayName.trim() ? [index] : []);
+  if (indices.length !== 1) throw new Error("登録者の行を一意に確認できないため、本人を除外できません。参加者を確認してください。");
+  const row = rows.nth(indices[0]!);
+  const controls = row.getByRole("button", { name: /^(削除|解除|取り除く|除外|Remove|Delete)$/i })
+    .or(row.getByRole("link", { name: /^(削除|解除|取り除く|除外|Remove|Delete)$/i }))
+    .or(row.locator('a.co-sel-icon.remove-item[title="選択を解除"], a.remove-item[title="選択解除"]'));
+  if (await controls.count() !== 1) throw new Error("登録先の本人削除ボタンを確認できません。本人を含む予約フォームは引き渡しません。");
+  await controls.click();
+  await page.waitForFunction(({ name, expected }) => {
+    const dialogs = Array.from(document.querySelectorAll<HTMLElement>(".co-sel-dialog")).filter(e => e.getClientRects().length > 0);
+    const labels = dialogs.flatMap(e => Array.from(e.querySelectorAll(".co-sel-bottom table tbody tr .name-text")).map(e => e.textContent?.trim() ?? ""));
+    return labels.length === expected.length && !labels.includes(name) && labels.every((label, index) => label === expected[index]);
+  }, { name: displayName.trim(), expected: names.filter((_, index) => index !== indices[0]) }, { timeout: 5000 });
+  return displayName.trim();
 }

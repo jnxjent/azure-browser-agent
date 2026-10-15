@@ -76,6 +76,22 @@ export interface FindAvailabilityTask {
   selectionMode?: "earliest";
   /** Search ahead for several choices when there is no end date. */
   autoExtendSearch?: boolean;
+  /**
+   * The requester books on behalf of others (e.g. 社長のスケジュールのみ勘案して).
+   * Their own schedule is ignored and they are omitted from the card participants.
+   */
+  excludeRequester?: boolean;
+}
+
+/** Read only the facility calendar; the requester's own schedule is not a constraint. */
+export interface FindRoomAvailabilityTask {
+  type: "find_room_availability";
+  facilityQuery: string;
+  date: string;
+  endDate: string;
+  durationMinutes: number;
+  windowStart: string;
+  windowEnd: string;
 }
 
 /** Read only the facility calendar; the requester's own schedule is not a constraint. */
@@ -190,10 +206,17 @@ export interface PendingBookingContext {
   availability: BookableAvailabilitySlot[];
   /** Company-wide facility availability retained for changing location later. */
   allFacilityAvailability?: BookableAvailabilitySlot[];
-  /** The requesting user's DeskNet's "代表組織", read from their own profile. */
+  /** The requesting user's desknet's "代表組織", read from their own profile. */
   userOrganization?: string;
-  /** The requesting user's DeskNet's display name, read from the schedule page's username control. */
+  /** The requesting user's desknet's display name, read from the schedule page's username control. */
   userDisplayName?: string;
+  /** See FindAvailabilityTask.excludeRequester; inherited by follow-up searches. */
+  excludeRequester?: boolean;
+  /**
+   * Verified requester display name when excludeRequester is set. New forms
+   * and participantIds both omit this person; retained for legacy contexts.
+   */
+  excludedRequesterId?: string;
 }
 
 export interface BookingResult {
@@ -207,7 +230,7 @@ export interface BookingResult {
 }
 
 export interface BookingApprovalRequest {
-  /** Verified DeskNet's equipment ID, not the facility display name. */
+  /** Verified desknet's equipment ID, not the facility display name. */
   nativeFacilityId?: string | undefined;
   nativeFacilityIds?: string[];
   /** Verified native user IDs, not the legacy participantIds display names. */

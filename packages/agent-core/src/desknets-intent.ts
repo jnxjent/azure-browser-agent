@@ -1,4 +1,5 @@
 import type { DeskNetsTask, ParticipantSelector } from "./contracts.js";
+import { readMeetingTitleInstruction } from "./meeting-title.js";
 
 // Exported so other packages (e.g. the facility-preference inference in
 // agent-api) can strip the same organizational suffixes without maintaining
@@ -17,10 +18,10 @@ const SELF_ORGANIZATION_NAME =
 const ORGANIZATION_NAME =
   `(?:${SELF_ORGANIZATION_NAME}|[^\\sと、。,.!！?？「」『』()（）0-9]{1,20}?${ORGANIZATION_SUFFIX})`;
 const PARTICIPANT_TITLE =
-  "(?:代表取締役|執行役員|取締役|副社長|本部長|支店長|副部長|副支店長|部長|次長|課長|室長|所長|係長|主任|専務|常務|マネージャー|リーダー)";
+  "(?:代表取締役|執行役員|取締役|副社長|社長|会長|本部長|支店長|副部長|副支店長|部長|次長|課長|室長|所長|係長|主任|専務|常務|マネージャー|リーダー)";
 const PARTICIPANT_SUFFIX = `(?:さん|${PARTICIPANT_TITLE})`;
 const PARTICIPANT_WITH_ORGANIZATION = new RegExp(
-  `(?:^|[\\s、,，・]|と)(?:(${ORGANIZATION_NAME})の)?([々一-龯髙﨑]{1,12}?)(?:${PARTICIPANT_SUFFIX})?(?=$|[\\s、,，・]|と|で|だけ|[がはをに]|の(?:空き|予定|打ち合わせ|会議|直近|最短|一番早|最も早|今日|明日|今週|来週))`,
+  `(?:^|[\\s、,，・]|と)(?:(${ORGANIZATION_NAME})の)?([々一-龯髙﨑]{1,12}?)(?:${PARTICIPANT_SUFFIX})?(?=$|[\\s、,，・]|と|で|だけ|[がはをに]|の(?:空き|空いて|スケジュール|予定|打ち合わせ|会議|直近|最短|一番早|最も早|今日|明日|今週|来週))`,
   "g",
 );
 const PARTICIPANT_SUFFIX_AT_END = new RegExp(`${PARTICIPANT_SUFFIX}$`);
@@ -118,7 +119,67 @@ export function parseDeskNetsTask(
     ...(/(?:直近|最短|一番早|最も早)/.test(normalized)
       ? { selectionMode: "earliest" as const }
       : {}),
+    ...(requestsRequesterExclusion(prompt) ? { excludeRequester: true } : {}),
   };
+}
+
+const SELF_WORD = "(?:私|わたし|わたくし|自分|僕|ぼく|俺)";
+const PERSON_TITLE =
+  "(?:さん|様|社長|会長|副社長|専務|常務|取締役|役員|本部長|支店長|部長|次長|課長|室長|所長|係長)";
+// 「のみならず」「だけでなく」は限定ではなく追加を表す。
+const PEOPLE_ONLY = "(?:のみ|だけ)(?!ならず|で(?:は)?な|じゃな|で(?:は)?無|を除|は除)";
+const REQUESTER_EXCLUSION_PATTERNS = [
+  new RegExp(`${SELF_WORD}(?:は|も|が)(?:(?:今回の|この)?(?:会議|打ち合わせ|ミーティング)(?:に|には))?(?:(?:参加|出席)(?:しない|しません|せず)|出ない|出ません)`),
+  // 私は参加しない／私は除いて／自分抜きで／私以外
+  new RegExp(`${SELF_WORD}(?:は|を|も|が)?(?:(?:参加|出席)(?:しない|しません|せず)|出ない|出ません|不参加|除いて|除外して|外して|抜いて|含めない|入れない)`),
+  new RegExp(`${SELF_WORD}の(?:スケジュール|予定|都合)(?:は|を)?(?:(?:考慮|勘案|参照)(?:しない|しません|せず)|含めない)`),
+  new RegExp(`${SELF_WORD}(?:抜き|以外)`),
+  // 社長の予定を代理で取って
+  /代理で|代わりに/,
+  // 社長のスケジュールのみ勘案して／社長だけ／鈴木さんのみ
+  new RegExp(`(?:${PERSON_TITLE}|対象者|参加対象者|指定した(?:人|参加者))(?:の(?:スケジュール|予定))?${PEOPLE_ONLY}`),
+];
+
+/**
+ * True when the requester explicitly books for others only, so their own
+ * schedule must not constrain the search and they are not a participant.
+ * By default (no such wording) the requester is included.
+ */
+export function requestsRequesterExclusion(prompt: string): boolean {
+  return readRequesterMembership(prompt) === "exclude";
+}
+
+export type RequesterMembership = "include" | "exclude" | "unchanged" | "unclear";
+
+function requesterClauses(prompt: string): string[] {
+  const text = prompt.normalize("NFKC").replace(/\s+/g, "");
+  return Array.from(text.matchAll(new RegExp(`${SELF_WORD}(?:は|も|が|を)([^、。！？!?]{0,60})`, "g")), match => match[1] ?? "")
+    .filter(clause => !/(?:さん|社長|部長|課長|会長)(?:は|が)/.test(clause));
+}
+
+export function hasRequesterMembershipAmbiguity(prompt: string): boolean {
+  return requesterClauses(prompt).some(clause => /かもしれ|かも|未定|わから|分から|不明|検討|迷って|わけでは|とは限ら/.test(clause));
+}
+
+export function isOtherPersonMembershipInstruction(prompt: string): boolean {
+  const text = prompt.normalize("NFKC").replace(/\s+/g, "");
+  return !new RegExp(`${SELF_WORD}(?:は|も|が|を)`).test(text) &&
+    /(?:さん|社長|部長|課長|会長)(?:は|が|を)[^、。！？!?]{0,30}(?:参加|出席|欠席|除外|外して)/.test(text);
+}
+
+/** Interpret this turn only. An absent or uncertain instruction never means attendance. */
+export function readRequesterMembership(prompt: string): RequesterMembership {
+  const text = prompt.normalize("NFKC").replace(/\s+/g, "");
+  if (hasRequesterMembershipAmbiguity(prompt)) return "unchanged";
+  const clauses = requesterClauses(prompt);
+  const negative = /(?:参加|出席)(?:しない|しません|せず|できない|できません|できず|不可)|欠席(?:する|します|なので|だから|です|で|$)|行かない|行きません|出ない|出ません|出なくて(?:いい|よい)|除外して|除いて|外して|抜いて|含めない|入れない/;
+  const positive = /(?:参加|出席|同席)(?:(?:します|する|して|できます|できる)(?=$|ので|から|予定です|つもりです|お願いします)|で(?:お願いします)?$|$)|(?:出ます|出る)(?=$|ので|から)|(?:含めて|入れて|加えて)(?=$|ください|ほしい|欲しい|お願いします)|(?:除かない|除外しない|外さない|抜かない)(?:で)?(?=$|ください|ほしい|欲しい)/;
+  const include = clauses.some(clause => positive.test(clause) && !negative.test(clause));
+  const exclude = clauses.some(clause => negative.test(clause));
+  if (include && exclude) return "unchanged";
+  if (include) return "include";
+  if (exclude) return "exclude";
+  return REQUESTER_EXCLUSION_PATTERNS.some(pattern => pattern.test(text)) ? "exclude" : "unchanged";
 }
 
 export function normalizeParticipantName(value: string): string {
@@ -215,6 +276,8 @@ function readEmailNotification(prompt: string): boolean {
 }
 
 function readMeetingTitle(prompt: string): string | undefined {
+  const explicit = readMeetingTitleInstruction(prompt);
+  if (explicit !== undefined) return explicit.title;
   const quoted = prompt.match(/(?:議題|件名)\s*[:=＝]\s*[「"]([^」"]+)[」"]/);
   if (quoted?.[1] !== undefined && quoted[1].trim() !== "") return quoted[1].trim();
   const plain = prompt.match(/(?:議題|件名)\s*[:=＝]\s*([^。\n]+)/);
@@ -419,4 +482,9 @@ function addDays(date: string, days: number): string {
   const next = new Date(`${date}T00:00:00Z`);
   next.setUTCDate(next.getUTCDate() + days);
   return next.toISOString().slice(0, 10);
+}
+
+/** An explicit correction to attend overrides exclusion inferred by the model. */
+export function requestsRequesterInclusion(prompt: string): boolean {
+  return readRequesterMembership(prompt) === "include";
 }

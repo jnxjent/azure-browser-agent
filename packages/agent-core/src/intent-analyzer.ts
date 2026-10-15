@@ -1,10 +1,15 @@
 import type { DeskNetsTask } from "./contracts.js";
-import { normalizeParticipantName, parseDeskNetsTask } from "./desknets-intent.js";
+import { normalizeParticipantName, parseDeskNetsTask, readRequesterMembership, type RequesterMembership } from "./desknets-intent.js";
 
 export interface IntentAnalysis {
   failureKind?: string;
+  taskValidationFailed?: boolean;
+  membershipClarificationTask?: Extract<DeskNetsTask, { type: "find_availability" }>;
   task: DeskNetsTask;
   source: "azure_openai" | "deterministic";
+  requesterMembership?: RequesterMembership;
+  requesterMembershipEvidence?: string | null;
+  requesterMembershipEvidenceValid?: boolean;
 }
 
 export interface AzureOpenAIIntentConfig {
@@ -41,6 +46,8 @@ interface StructuredIntent {
   title: string | null;
   selectedStart: string | null;
   selectedEnd: string | null;
+  requesterMembership?: RequesterMembership;
+  requesterMembershipEvidence?: string | null;
 }
 
 export async function analyzeDeskNetsIntent(
@@ -50,7 +57,7 @@ export async function analyzeDeskNetsIntent(
 ): Promise<IntentAnalysis> {
   const config = options.config ?? readAzureOpenAIIntentConfig();
   if (config === undefined) {
-    return { task: parseDeskNetsTask(prompt, now), source: "deterministic" };
+    return deterministicAnalysis(prompt, now);
   }
   for (let attempt = 0; attempt < (options.requireLlm ? 2 : 1); attempt++) {
   try {
@@ -61,19 +68,80 @@ export async function analyzeDeskNetsIntent(
       options.fetchImplementation ?? fetch,
       options,
     );
-    return { task: validateStructuredIntent(structured, prompt), source: "azure_openai" };
+    const modelMembership = structured.requesterMembership ?? "unchanged";
+    if (!["include", "exclude", "unchanged", "unclear"].includes(modelMembership)) throw new TypeError("Invalid requester membership instruction.");
+    const evidence = modelMembership === "unchanged" || typeof structured.requesterMembershipEvidence !== "string"
+      ? null : structured.requesterMembershipEvidence;
+    const normalize = (value: string) => value.normalize("NFKC").replace(/\s+/gu, "");
+    const state = options.conversationState as { requesterMembershipQuestion?: boolean; conversation?: { requesterMembershipQuestion?: boolean } } | undefined;
+    const pendingQuestion = state?.requesterMembershipQuestion === true || state?.conversation?.requesterMembershipQuestion === true;
+    const quote = evidence === null ? "" : normalize(evidence);
+    const confirmation = /^(?:はい|いいえ)[、。,.!！]*(?:お願いします|です)?[。.!！]*$/.test(quote);
+    const evidenceValid = quote.length > 0 && normalize(prompt).includes(quote) &&
+      (confirmation ? pendingQuestion : Array.from(quote).length >= 3);
+    const requesterMembership = (modelMembership === "include" || modelMembership === "exclude") && !evidenceValid
+      ? "unchanged" : modelMembership;
+    let task: DeskNetsTask;
+    let taskValidationFailed = false;
+    try { task = validateStructuredIntent(structured, requesterMembership, prompt); }
+    catch {
+      // Transport/JSON failures use the offline parser; unrelated scheduling
+      // validation errors must never replace a grounded membership decision.
+      taskValidationFailed = true;
+      task = { type: "clarify", question: "検索条件を確認できませんでした。参加者と期間を教えてください。" };
+    }
+    let membershipClarificationTask: Extract<DeskNetsTask, { type: "find_availability" }> | undefined;
+    if (requesterMembership === "unclear") {
+      try {
+        const pending = validateStructuredIntent({ ...structured, intent: "find_availability" }, "unchanged", prompt);
+        if (pending.type === "find_availability") membershipClarificationTask = pending;
+      } catch { /* Save the original utterance on the server if conditions remain incomplete. */ }
+    }
+    logMembership(modelMembership, evidence, evidenceValid, readRequesterMembership(prompt), requesterMembership, "azure_openai", structured.participants);
+    return {
+      task: task.type === "find_availability"
+        ? { ...task, ...(requesterMembership === "include" ? { excludeRequester: false }
+          : requesterMembership === "exclude" ? { excludeRequester: true } : {}) }
+        : task,
+      source: "azure_openai",
+      requesterMembership, requesterMembershipEvidence: evidence, requesterMembershipEvidenceValid: evidenceValid,
+      ...(taskValidationFailed ? { taskValidationFailed: true } : {}),
+      ...(membershipClarificationTask ? { membershipClarificationTask } : {}),
+    };
   } catch (error) {
     const failureKind = error instanceof Error ? error.name : "UnknownError";
     if (options.requireLlm) {
       const httpStatus = error instanceof Error ? error.message.match(/intent request failed: (\d+)/)?.[1] : undefined;
       console.warn("[DeskNetsIntent] analysis failed", { attempt: attempt + 1, failureKind, httpStatus });
       if (attempt === 0) continue;
-      return { task: { type: "clarify", question: "会話の解析を完了できませんでした。指定済みの条件は保持しています。時間をおいてもう一度お試しください。" }, source: "azure_openai", failureKind };
+      return deterministicAnalysis(prompt, now, failureKind);
     }
-    return { task: parseDeskNetsTask(prompt, now), source: "deterministic" };
+    return deterministicAnalysis(prompt, now, failureKind);
   }
   }
   throw new Error("Intent analysis exhausted retries.");
+}
+
+function deterministicAnalysis(prompt: string, now: Date, failureKind?: string): IntentAnalysis {
+  const requesterMembership = readRequesterMembership(prompt);
+  logMembership(null, null, false, requesterMembership, requesterMembership, "deterministic");
+  let task: DeskNetsTask;
+  try { task = parseDeskNetsTask(prompt, now); }
+  catch (error) {
+    if (requesterMembership !== "unchanged") task = { type: "show_candidates" };
+    else if (failureKind) task = { type: "clarify", question: "会話を解析できませんでした。条件は保持しています。もう一度お試しください。" };
+    else throw error;
+  }
+  return { task, source: "deterministic", requesterMembership, ...(failureKind ? { failureKind } : {}) };
+}
+
+function logMembership(llmValue: string | null, evidence: string | null, evidenceValid: boolean,
+  regexValue: RequesterMembership, final: RequesterMembership, source: IntentAnalysis["source"], participants: StructuredParticipant[] = []): void {
+  // Logging redaction only: never use this transformation to interpret attendance.
+  let redacted = evidence;
+  for (const person of participants) if (person.name && redacted) redacted = redacted.split(person.name).join("[参加者]");
+  redacted = redacted?.replace(/[\p{L}\p{M}]+(?:さん|社長|部長|課長|会長|様)/gu, "[参加者]") ?? null;
+  console.info("[RequesterMembership]", { llmValue, evidence: redacted, evidenceValid, regexValue, final, source });
 }
 
 export function readAzureOpenAIIntentConfig(
@@ -109,8 +177,8 @@ async function requestStructuredIntent(
             "If selectedStart is known but end/duration is missing, use the saved duration or 60 minutes. Email and self notification default ON. Missing room is NOT a reason to clarify: saved preferences select it.",
             "Choose selectionMode=earliest whenever the user wants the soonest possible meeting, regardless of phrasing; otherwise list. For choosing a numbered candidate, resolve its start/end from saved candidates and return book_meeting directly with sendEmail=true unless previously disabled. When participants change, return find_availability to recheck everyone.",
             "If essential participant or time information is truly ambiguous, use clarify and ask ONLY for that missing information; never restart the conversation or invent people/dates. If no live availability exists, first return find_availability using participants/dates recovered from dialogue.",
-            "The explicit card-button action only authorizes displaying the prepared DeskNet's form. Conversation confirmations never authorize registration, and the user must click DeskNet's own Add button manually.",
-            "Analyze a Japanese DeskNet's scheduling request into the supplied JSON schema.",
+            "The explicit card-button action only authorizes displaying the prepared desknet's form. Conversation confirmations never authorize registration, and the user must click desknet's own Add button manually.",
+            "Analyze a Japanese desknet's scheduling request into the supplied JSON schema.",
             `Current instant: ${now.toISOString()}. Calendar timezone: Asia/Tokyo.`,
             "Resolve 今日, 明日, N週間以内, 今週, 来週, 今月中, and explicit ranges to inclusive YYYY-MM-DD dates.",
             "If an availability request omits a date, use today through six calendar days later.",
@@ -123,7 +191,10 @@ async function requestStructuredIntent(
             "If a participant's department or organization is named (e.g. 営業部の佐藤さん), set that participant's organization field to it; otherwise use null.",
             "When 当部 precedes a participant list, apply organization 当部 to subsequent participants without another explicit department. Preserve 当部 literally; the browser resolves the requester's department and searches company-wide if that department has no matching person.",
             "Participant names may be written with or without the honorific さん or a job title such as 部長 or 次長. Remove the honorific or job title from each participant name.",
-            "The authenticated requester is automatically included by DeskNet's. NEVER include 私, 自分, 本人, 僕, or 俺 in participants; include only the other people to look up.",
+            "Never put the authenticated requester (私, 自分, 本人, 僕, 俺 or their name) in participants. Express their attendance exclusively through requesterMembership. The application includes the requester by default and preserves saved membership separately.",
+            "requesterMembership describes ONLY the latest utterance, independently of intent: include, exclude, unchanged, or unclear. Use unclear for uncertain requester attendance. Never copy saved membership. Interpret semantically; another person attendance must not change requester membership. requesterMembershipEvidence must be a meaningful exact quotation from latestUserMessage supporting include/exclude, at least three characters (except yes/no replies to a pending membership question); use null for unchanged. Never quote history or saved state. Resolve replies from the actual pending question and state. For the pending question ご自身を参加者から外しますか？, はい means exclude with evidence はい and いいえ means include with evidence いいえ. Otherwise yes/no alone is unchanged with null evidence.",
+            "Only when requesterMembership actually changes saved attendance, return find_availability rather than show_candidates, book_meeting or select_booking_candidate, recovering unchanged conditions from saved state. If attendance is already the requested value, interpret the remaining request normally: 候補1で。私も参加します selects candidate 1 when the requester is already included. An explicit request to rescan still returns find_availability. When unclear, preserve all newest participants/dates/duration/location in the fields even if intent is clarify, so the pending new search can resume after confirmation.",
+            "Examples: 私は会議に参加しないので、除外してください。再び候補をください。 => exclude, evidence 私は会議に参加しない; 私は参加できないので、候補を出し直して => exclude, evidence 私は参加できない; 私も参加します。候補をください => include, evidence 私も参加します; 鈴木さんは参加できないので外して => unchanged, evidence null; 参加できないかもしれない => unclear; 田中社長のスケジュールのみ勘案して来週の空き => exclude, evidence 田中社長のスケジュールのみ勘案して; 部長だけでなく課長も参加します => unchanged, evidence null; 田中さんの代わりに私が参加する => include, evidence 私が参加する.",
             "For find_availability, preserve a room/location restriction such as 会議室はアクトで in facilityQuery; otherwise use null.",
             "When the user asks for candidate dates with one room at EACH of two locations (e.g. 鈴木さんは有玉、私はアクト、それぞれ会議室1室), return find_availability with all named people, the date range, and duration. Set facilityQuery to null: the application checks both locations simultaneously. This is a read-only candidate search, not book_meeting.",
             "For book_meeting, if the user does not name a specific room or facility, set facilityQuery to null; do not guess a facility. A per-user default preference is applied separately when facilityQuery is null.",
@@ -147,9 +218,10 @@ async function requestStructuredIntent(
   return JSON.parse(readCompletionContent(body)) as StructuredIntent;
 }
 
-function validateStructuredIntent(value: StructuredIntent, prompt: string): DeskNetsTask {
+function validateStructuredIntent(value: StructuredIntent, membership: RequesterMembership, prompt: string): DeskNetsTask {
   if (value.intent === "clarify") return { type: "clarify", question: readText(value.question ?? null, "question") };
   if (value.intent === "find_availability") {
+
     const date = readIsoDate(value.dateStart, "dateStart");
     // A model can leave an open-ended "X日以降" request without dateEnd.
     // Apply the same seven-day window used when the request omits a date.
@@ -167,6 +239,7 @@ function validateStructuredIntent(value: StructuredIntent, prompt: string): Desk
           : readText(participant.organization, "participant organization");
       return organization === undefined ? { name } : { name, organization };
     });
+    if (participants.length === 0 && membership === "exclude") throw new TypeError("本人以外の参加者を指定してください。");
     const keys = participants.map((participant) => `${participant.name}:${participant.organization ?? ""}`);
     if (new Set(keys).size !== keys.length) {
       throw new TypeError("LLM intent returned duplicate participants.");
@@ -300,7 +373,9 @@ const INTENT_SCHEMA = {
     title: nullableString,
     selectedStart: nullableString,
     selectedEnd: nullableString,
+    requesterMembershipEvidence: { type: ["string", "null"] },
+    requesterMembership: { type: "string", enum: ["include", "exclude", "unchanged", "unclear"] },
   },
-  required: ["intent", "participants", "dateStart", "dateEnd", "durationMinutes", "facilityQuery", "candidateNumber", "sendEmail", "title", "selectedStart", "selectedEnd", "question", "excludePreviousFacility", "selectionMode"],
+  required: ["intent", "participants", "dateStart", "dateEnd", "durationMinutes", "facilityQuery", "candidateNumber", "sendEmail", "title", "selectedStart", "selectedEnd", "question", "excludePreviousFacility", "selectionMode", "requesterMembership", "requesterMembershipEvidence"],
   additionalProperties: false,
 } as const;

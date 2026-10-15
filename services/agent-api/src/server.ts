@@ -10,7 +10,11 @@ import {
   readAzureOpenAIIntentConfig,
   filterFutureAvailability,
   parseDeskNetsTask,
+  requestsRequesterInclusion,
+  requestsRequesterExclusion,
+  readRequesterMembership,
   readDurationMinutes,
+  readMeetingTitleInstruction,
   validateCreateRunInput,
   detectWebMeetingRequest,
   ORGANIZATION_SUFFIX,
@@ -18,10 +22,12 @@ import {
   type BrowserRun,
   type CreateRunInput,
   type DeskNetsTask,
+  type IntentAnalysis,
   type FindAvailabilityTask,
   type MultiLocationAvailabilitySlot,
   type PendingBookingContext,
   type PendingParticipantChoice,
+  type ParticipantSelector,
 } from "@azure-browser-agent/agent-core";
 import {
   DeskNetsBrowserWorker,
@@ -80,6 +86,7 @@ interface PendingFacilityChoice {
 }
 
 export interface PendingBookingConversation {
+  requesterMembershipQuestion?: boolean;
   sendEmail?: boolean;
   context: PendingBookingContext;
   facilityId?: string;
@@ -91,6 +98,7 @@ export interface PendingBookingConversation {
 }
 
 const pendingBookings = new Map<string, PendingBookingConversation>();
+const pendingRequesterMembership = new Map<string, { originalPrompt: string; search?: FindAvailabilityTask }>();
 interface PendingMultiLocationCandidates {
   candidates: MultiLocationAvailabilitySlot[];
   lines: string[];
@@ -130,7 +138,7 @@ const webMeetingStore = new WebMeetingStore(
 // Clears the one-shot "awaiting a specific reply" markers after they've been
 // consumed, while keeping the reusable data (context.availability,
 // candidates, facilityId) so show_candidates can still re-display it if the
-// user changes their mind before manually confirming in DeskNet's.
+// user changes their mind before manually confirming in desknet's.
 function clearTransientConversationFlags(
   conversation: PendingBookingConversation,
 ): PendingBookingConversation {
@@ -160,6 +168,10 @@ export function isShowCandidatesRequest(prompt: string): boolean {
 const WEB_REQUEST_ONLY = /^(?:web|ウェブ|オンライン|teams|チームズ|リモート)(?:会議|ミーティング)?(?:も|を|で)?(?:設定|作成|追加|付け|つけ|希望|お願い)?(?:して|してください|したい|します|でお願いします|にして)?[。.!！\s]*$/i;
 
 /** A numbered choice may carry a WEB preference, which is not a room choice. */
+export function isSimpleNumberedCandidateSelection(prompt: string): boolean {
+  return /^(?:(?:では|それでは|じゃあ)[、,]?)?(?:候補(?:の中)?(?:の)?|上記)?[\s、,]*[0-9]+(?:番(?:目)?)?(?:で|を選んで|にして)?(?:お願いします)?[。.!！\s]*$/.test(prompt.normalize("NFKC").trim());
+}
+
 export function readNumberedCandidateSelection(prompt: string): number | undefined {
   const normalized = prompt.normalize("NFKC").trim();
   const match = normalized.match(
@@ -450,13 +462,28 @@ async function route(
         multiUserScheduler.admittedCount >= 5) {
       sendJson(response, 429, {
         status: "failed",
-        message: "DeskNet's の依頼は現在５件受付中です。少し待ってからもう一度お試しください。",
+        message: "desknet's の依頼は現在５件受付中です。少し待ってからもう一度お試しください。",
       });
       return;
     }
+    let preliminaryAnalysis: IntentAnalysis | undefined;
     if (validatedInput.site === "desknets") {
       const multiRoomSearch = parseMultiRoomAvailability(validatedInput.prompt);
-      if (multiRoomSearch !== undefined) {
+      const roomSearch = parseFacilityOnlyAvailability(submittedInput.prompt, structuredCommand?.facility.preferred);
+      // Room-search parsers cannot decide whether an accompanying attendance
+      // correction concerns the requester. Let the model decide first.
+      if ((multiRoomSearch || roomSearch) && readAzureOpenAIIntentConfig()) {
+        preliminaryAnalysis = await analyzeDeskNetsIntent(validatedInput.prompt, new Date(), {
+          conversationHistory: validatedInput.conversationHistory ?? [],
+          conversationState: { conversation: pendingBookings.get(conversationKey(validatedInput)) ?? null,
+            requesterMembershipQuestion: pendingRequesterMembership.has(conversationKey(validatedInput)),
+            pendingRequesterMembership: pendingRequesterMembership.get(conversationKey(validatedInput)) ?? null },
+          requireLlm: true,
+        });
+      }
+      const canUseRoomShortcut = !pendingRequesterMembership.has(conversationKey(validatedInput)) &&
+        (preliminaryAnalysis === undefined || (!preliminaryAnalysis.taskValidationFailed && preliminaryAnalysis.requesterMembership === "unchanged"));
+      if (multiRoomSearch !== undefined && canUseRoomShortcut) {
         pendingMultiLocationCandidates.delete(conversationKey(validatedInput));
         const multiRoomRun: BrowserRun = {
           ...createRun({ ...validatedInput, mode: "read" }),
@@ -466,6 +493,21 @@ async function route(
         runs.set(multiRoomRun.id, multiRoomRun);
         startRun(multiRoomRun.id);
         sendJson(response, 202, multiRoomRun);
+        return;
+      }
+      if (roomSearch !== undefined && canUseRoomShortcut) {
+        const roomRun: BrowserRun = {
+          ...createRun({ ...validatedInput, mode: "read" }),
+          intentSource: "deterministic",
+          task: { type: "find_availability", participants: [],
+            facilityQuery: roomSearch.facilityQuery, date: roomSearch.date, endDate: roomSearch.endDate,
+            durationMinutes: roomSearch.durationMinutes, windowStart: roomSearch.windowStart, windowEnd: roomSearch.windowEnd,
+            ...(parseFlexibleFacilityQuery(roomSearch.facilityQuery)?.facilityType === undefined ? {} :
+              { facilityType: parseFlexibleFacilityQuery(roomSearch.facilityQuery)!.facilityType! }) },
+        };
+        runs.set(roomRun.id, roomRun);
+        startRun(roomRun.id);
+        sendJson(response, 202, roomRun);
         return;
       }
     }
@@ -495,31 +537,6 @@ async function route(
         }
       }
     }
-    if (validatedInput.site === "desknets") {
-      const roomSearch = parseFacilityOnlyAvailability(
-        validatedInput.prompt, structuredCommand?.facility.preferred,
-      );
-      if (roomSearch !== undefined) {
-        // A room search must also check the signed-in requester's calendar.
-        // The normal availability worker selects that person automatically and
-        // saves numbered slots for a later confirmation card.
-        const roomRun: BrowserRun = {
-          ...createRun({ ...validatedInput, mode: "read" }),
-          intentSource: "deterministic",
-          task: {
-            type: "find_availability", participants: [],
-            facilityQuery: roomSearch.facilityQuery,
-            date: roomSearch.date, endDate: roomSearch.endDate,
-            durationMinutes: roomSearch.durationMinutes,
-            windowStart: roomSearch.windowStart, windowEnd: roomSearch.windowEnd,
-          },
-        };
-        runs.set(roomRun.id, roomRun);
-        startRun(roomRun.id);
-        sendJson(response, 202, roomRun);
-        return;
-      }
-    }
     const registeredFacilityPreferences = parseFacilityPreferenceRegistration(
       validatedInput.prompt,
     );
@@ -545,8 +562,40 @@ async function route(
     const pendingApproval = validatedInput.site === "desknets"
       ? findPendingApproval(validatedInput.userId, validatedInput.threadId)
       : undefined;
-    const savedConversation = pendingBookings.get(conversationKey(validatedInput));
-    const participantRefinement = validatedInput.site === "desknets"
+    let savedConversation = pendingBookings.get(conversationKey(validatedInput));
+    // Offline fallback only. Configured conversations interpret attendance
+    // through the model before title/duration/booking shortcuts.
+    if (validatedInput.site === "desknets" && savedConversation !== undefined &&
+        readAzureOpenAIIntentConfig() === undefined && isRequesterMembershipOnlyInstruction(validatedInput.prompt)) {
+      const saved = savedConversation.context;
+      const fallbackAnalysis = await analyzeDeskNetsIntent(validatedInput.prompt);
+      const excludeRequester = fallbackAnalysis.requesterMembership === "exclude";
+      if (excludeRequester && !saved.participants?.length) {
+        throw new TypeError("本人を除外した後の参加者を指定してください。");
+      }
+      const task: FindAvailabilityTask = {
+        type: "find_availability", participants: saved.participants ?? [],
+        date: saved.date, endDate: saved.endDate ?? saved.date,
+        durationMinutes: saved.durationMinutes, excludeRequester,
+        ...(saved.facilityQuery === undefined ? {} : { facilityQuery: saved.facilityQuery }),
+        ...(saved.requiredFacilityLocations === undefined ? {} : { requiredFacilityLocations: saved.requiredFacilityLocations }),
+        ...(saved.requiredFacilityQueries === undefined ? {} : { requiredFacilityQueries: saved.requiredFacilityQueries }),
+        ...(saved.windowStart === undefined ? {} : { windowStart: saved.windowStart }),
+        ...(saved.windowEnd === undefined ? {} : { windowEnd: saved.windowEnd }),
+        ...(saved.title === undefined ? {} : { title: saved.title }),
+      };
+      cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId, true);
+      pendingBookings.delete(conversationKey(validatedInput));
+      pendingMultiLocationCandidates.delete(conversationKey(validatedInput));
+      pendingParticipantChoices.delete(conversationKey(validatedInput));
+      const refreshed: BrowserRun = { ...createRun({ ...validatedInput, mode: "read" }),
+        intentSource: "deterministic", task };
+      runs.set(refreshed.id, refreshed);
+      startRun(refreshed.id);
+      sendJson(response, 202, refreshed);
+      return;
+    }
+    const participantRefinement = validatedInput.site === "desknets" && readAzureOpenAIIntentConfig() === undefined
       ? buildParticipantCandidateRefinement(validatedInput.prompt, savedConversation)
       : undefined;
     if (participantRefinement !== undefined) {
@@ -562,8 +611,39 @@ async function route(
       sendJson(response, 202, refined);
       return;
     }
+    const titleInstruction = validatedInput.site === "desknets"
+      ? readMeetingTitleInstruction(validatedInput.prompt) : undefined;
+    if (titleInstruction?.onlyTitle && readAzureOpenAIIntentConfig() === undefined) {
+      if (savedConversation === undefined) {
+        throw new TypeError("先に同じ会話で参加者の空き時間を確認してください。");
+      }
+      const context = { ...savedConversation.context, title: titleInstruction.title };
+      const proposal = pendingApproval?.result?.approvalRequest;
+      const slot = proposal ?? savedConversation.selectedSlot;
+      const facilityId = proposal?.facilityId ?? savedConversation.facilityId;
+      cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId);
+      pendingBookings.set(conversationKey(validatedInput), { ...savedConversation, context });
+      const changed = createRun({ ...validatedInput, mode: slot ? "write" : "read" });
+      if (slot !== undefined && facilityId !== undefined) {
+        assertSlotHasNotStarted(slot);
+        const prepared: BrowserRun = { ...changed, intentSource: "deterministic", context,
+          task: { type: "book_meeting", title: titleInstruction.title,
+            selectedStart: slot.start, selectedEnd: slot.end, facilityQuery: facilityId,
+            sendEmail: proposal?.emailNotificationWillBeSent ?? savedConversation.sendEmail ?? true } };
+        runs.set(prepared.id, prepared);
+        startRun(prepared.id);
+        sendJson(response, 202, prepared);
+      } else {
+        const saved: BrowserRun = { ...changed, status: "completed", result: {
+          summary: "Saved the explicit meeting title.", evidence: [],
+          assistantMessage: `件名を「${titleInstruction.title}」に設定しました。続けて日時候補を選んでください。` } };
+        runs.set(saved.id, saved);
+        sendJson(response, 202, saved);
+      }
+      return;
+    }
     if (validatedInput.site === "desknets" && savedConversation !== undefined &&
-        isAvailabilityRefreshRequest(validatedInput.prompt) && !hasExplicitSearchPeriod(validatedInput.prompt)) {
+        readAzureOpenAIIntentConfig() === undefined && isAvailabilityRefreshRequest(validatedInput.prompt) && !hasExplicitSearchPeriod(validatedInput.prompt)) {
       const context = savedConversation.context;
       const today = currentJapanDate();
       const previousDays = inclusiveDateRangeDays(context.date, context.endDate ?? context.date);
@@ -579,14 +659,15 @@ async function route(
           ...(context.windowStart === undefined ? {} : {windowStart:context.windowStart}),
           ...(context.windowEnd === undefined ? {} : {windowEnd:context.windowEnd}),
           ...(context.facilityType === undefined ? {} : {facilityType:context.facilityType}),
-          ...(context.facilityQuery === undefined ? {} : {facilityQuery:context.facilityQuery})},
+          ...(context.facilityQuery === undefined ? {} : {facilityQuery:context.facilityQuery}),
+          ...(context.excludeRequester && !requestsRequesterInclusion(validatedInput.prompt) ? {excludeRequester:true} : {})},
       };
       runs.set(refreshed.id, refreshed);
       startRun(refreshed.id);
       sendJson(response, 202, refreshed);
       return;
     }
-    const roomChangeTask = validatedInput.site === "desknets" ? buildRoomOnlyChangeTask(validatedInput.prompt, savedConversation) : undefined;
+    const roomChangeTask = validatedInput.site === "desknets" && readAzureOpenAIIntentConfig() === undefined ? buildRoomOnlyChangeTask(validatedInput.prompt, savedConversation) : undefined;
     if (roomChangeTask !== undefined && savedConversation !== undefined) {
       cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId);
       const changed = { ...createRun(validatedInput), input: { ...validatedInput, mode: "write" as const },
@@ -626,7 +707,7 @@ async function route(
     const multiLocationSelection = multiLocationCandidates === undefined
       ? undefined
       : readMultiLocationCandidateSelection(validatedInput.prompt, multiLocationCandidates.lines);
-    if (validatedInput.site === "desknets" && multiLocationCandidates !== undefined && multiLocationSelection !== undefined) {
+    if (validatedInput.site === "desknets" && multiLocationCandidates !== undefined && multiLocationSelection !== undefined && (isSimpleNumberedCandidateSelection(validatedInput.prompt) || readNumberedCandidateSelection(validatedInput.prompt) === undefined)) {
       const slot = multiLocationCandidates.candidates[multiLocationSelection - 1];
       if (slot === undefined) throw new TypeError("有効な候補番号を指定してください。");
       assertSlotHasNotStarted(slot);
@@ -654,24 +735,16 @@ async function route(
       sendJson(response, 202, selected);
       return;
     }
-    const selectedCandidate = readNumberedCandidateSelection(validatedInput.prompt);
-    const standaloneRoomTask = savedConversation === undefined && validatedInput.site === "desknets"
-      ? (() => {
-          try {
-            const parsed = parseDeskNetsTask(validatedInput.prompt);
-            return parsed.type === "find_availability" && parsed.participants.length === 0 && parsed.facilityQuery
-              ? parsed : undefined;
-          } catch { return undefined; }
-        })()
-      : undefined;
-    let semanticAnalysis = savedConversation?.candidates !== undefined && selectedCandidate !== undefined
+    const selectedCandidate = isSimpleNumberedCandidateSelection(validatedInput.prompt)
+      ? readNumberedCandidateSelection(validatedInput.prompt) ?? Number(validatedInput.prompt.normalize("NFKC").match(/\d+/)?.[0]) : undefined;
+    let semanticAnalysis: IntentAnalysis | undefined = preliminaryAnalysis ?? (savedConversation?.candidates !== undefined && !savedConversation.requesterMembershipQuestion && !pendingRequesterMembership.has(conversationKey(validatedInput)) && selectedCandidate !== undefined
       ? { source: "deterministic" as const, task: { type: "select_booking_candidate" as const, candidateNumber: selectedCandidate } }
-      : standaloneRoomTask !== undefined
-      ? { source: "deterministic" as const, task: standaloneRoomTask }
       : validatedInput.site === "desknets" && readAzureOpenAIIntentConfig() !== undefined
       ? await analyzeDeskNetsIntent(validatedInput.prompt, new Date(), {
           conversationHistory: validatedInput.conversationHistory ?? [],
           conversationState: {
+            requesterMembershipQuestion: pendingRequesterMembership.has(conversationKey(validatedInput)),
+            pendingRequesterMembership: pendingRequesterMembership.get(conversationKey(validatedInput)) ?? null,
             conversation: savedConversation === undefined ? null : {
               ...savedConversation,
               candidates: savedConversation.candidates?.slice(0, 50),
@@ -691,10 +764,10 @@ async function route(
           },
           requireLlm: true,
         })
-      : undefined;
+      : undefined);
     // A validated, explicit room-only request can recover from an LLM outage
     // without reinterpreting dates or participants or authorizing registration.
-    if (semanticAnalysis?.failureKind !== undefined && savedConversation !== undefined) {
+    if (semanticAnalysis?.failureKind !== undefined && semanticAnalysis.requesterMembership === "unchanged" && savedConversation !== undefined) {
       const previous = savedConversation.awaitingFacilityChoice;
       const proposal = pendingApproval?.result?.approvalRequest;
       const start = proposal?.start ?? previous?.selectedStart ?? savedConversation.selectedSlot?.start;
@@ -702,7 +775,7 @@ async function route(
       const alternative = parseAlternativeFacilityRequest(validatedInput.prompt,
         previous?.facilityScope ?? inferFacilityScope(proposal?.facilityId ?? savedConversation.facilityId ?? ""));
       if (alternative !== undefined && start !== undefined && end !== undefined) {
-        semanticAnalysis = { source: "deterministic", task: {
+        semanticAnalysis = { ...semanticAnalysis, source: "deterministic", task: {
           type: "book_meeting", facilityQuery: alternative.preferredQuery, excludePreviousFacility: true,
           selectedStart: start, selectedEnd: end,
           title: proposal?.title ?? previous?.title ?? savedConversation.context.title ?? "",
@@ -710,12 +783,60 @@ async function route(
         } };
       }
     }
-    if (semanticAnalysis?.task.type === "clarify") {
+    const awaitingMembership = pendingRequesterMembership.get(conversationKey(validatedInput));
+    if (semanticAnalysis?.requesterMembership === "unclear") {
+      const pendingSearch = semanticAnalysis.membershipClarificationTask ?? awaitingMembership?.search;
+      pendingRequesterMembership.set(conversationKey(validatedInput), {
+        originalPrompt: awaitingMembership?.originalPrompt ?? validatedInput.prompt,
+        ...(pendingSearch ? { search: pendingSearch } : {}),
+      });
+      if (savedConversation) savedConversation.requesterMembershipQuestion = true;
+      semanticAnalysis = { ...semanticAnalysis, task: { type: "clarify", question: "ご自身を参加者から外しますか？" } };
+    } else if (awaitingMembership && semanticAnalysis &&
+        (semanticAnalysis.requesterMembership === "include" || semanticAnalysis.requesterMembership === "exclude")) {
+      const search = awaitingMembership.search ?? (semanticAnalysis.task.type === "find_availability" ? semanticAnalysis.task : undefined);
+      if (search) {
+        const task: FindAvailabilityTask = { ...search, excludeRequester: semanticAnalysis.requesterMembership === "exclude" };
+        // This is the pending NEW request, not the previous conversation's search.
+        savedConversation = { context: { ...task, participantIds: [], availability: [] } };
+        cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId, true);
+        pendingMultiLocationCandidates.delete(conversationKey(validatedInput));
+        pendingParticipantChoices.delete(conversationKey(validatedInput));
+        pendingBookings.set(conversationKey(validatedInput), savedConversation);
+        semanticAnalysis = { ...semanticAnalysis, task, taskValidationFailed: false };
+        pendingRequesterMembership.delete(conversationKey(validatedInput));
+      } else {
+        semanticAnalysis = { ...semanticAnalysis, taskValidationFailed: true,
+          task: { type: "clarify", question: "参加のご希望は確認しました。今回検索する参加者と期間を教えてください。" } };
+      }
+    } else if (awaitingMembership && semanticAnalysis) {
+      semanticAnalysis = { ...semanticAnalysis, task: { type: "clarify", question: "ご自身を参加者から外しますか？" } };
+    } else if (savedConversation) {
+      delete savedConversation.requesterMembershipQuestion;
+      pendingRequesterMembership.delete(conversationKey(validatedInput));
+    }
+    const membershipChangesSaved = savedConversation !== undefined &&
+      ((semanticAnalysis?.requesterMembership === "exclude" && !savedConversation.context.excludeRequester) ||
+       (semanticAnalysis?.requesterMembership === "include" && savedConversation.context.excludeRequester));
+    if (semanticAnalysis?.task.type === "clarify" &&
+        (!membershipChangesSaved || (semanticAnalysis.taskValidationFailed && awaitingMembership !== undefined))) {
       const clarification: BrowserRun = { ...createRun(validatedInput), status: "awaiting_user_input",
         intentSource: semanticAnalysis.source, task: semanticAnalysis.task,
         result: { summary: "Clarifying the scheduling conversation.", assistantMessage: semanticAnalysis.task.question, evidence: [] } };
       runs.set(clarification.id, clarification);
       sendJson(response, 202, clarification);
+      return;
+    }
+    // A room-only optimization is safe only after the LLM kept membership.
+    const interpretedRoomChange = semanticAnalysis?.requesterMembership === "unchanged"
+      ? buildRoomOnlyChangeTask(validatedInput.prompt, savedConversation) : undefined;
+    if (interpretedRoomChange && savedConversation) {
+      cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId);
+      const changed = { ...createRun(validatedInput), input: { ...validatedInput, mode: "write" as const },
+        intentSource: semanticAnalysis!.source, task: interpretedRoomChange, context: savedConversation.context };
+      runs.set(changed.id, changed);
+      startRun(changed.id);
+      sendJson(response, 202, changed);
       return;
     }
     const durationChange = pendingApproval === undefined || semanticAnalysis !== undefined
@@ -916,7 +1037,7 @@ async function route(
           );
       const selectedFacilityQuery =
         requestedFacilityQuery ?? conversation?.context.facilityQuery;
-      const analysis = semanticAnalysis ?? (selectedSlot === undefined
+      const analysis: IntentAnalysis = semanticAnalysis ?? (selectedSlot === undefined
         ? await analyzeDeskNetsIntent(validatedInput.prompt, new Date(), {
             conversationHistory: validatedInput.conversationHistory ?? [], conversationState: conversation,
           })
@@ -934,6 +1055,32 @@ async function route(
             },
           });
       let task = analysis.task;
+      // Changing requester membership invalidates the old candidates in either
+      // direction. A simultaneous candidate selection must become a new search.
+      const membership = analysis.requesterMembership ?? (analysis.source === "deterministic" ? readRequesterMembership(validatedInput.prompt) : "unchanged");
+      const requesterIncluded = membership === "include";
+      const requesterExcluded = membership === "exclude";
+      if (conversation && ((requesterExcluded && !conversation.context.excludeRequester) || (requesterIncluded && conversation.context.excludeRequester))) {
+        const saved = conversation.context;
+        cancelSupersededApprovals(validatedInput.userId, validatedInput.threadId, true);
+        pendingBookings.delete(conversationKey(validatedInput));
+        pendingMultiLocationCandidates.delete(conversationKey(validatedInput));
+        pendingParticipantChoices.delete(conversationKey(validatedInput));
+        task = task.type === "find_availability" ? { ...task, excludeRequester: requesterExcluded } : { type: "find_availability", participants: saved.participants ?? [],
+          date: saved.date, endDate: saved.endDate ?? saved.date,
+          durationMinutes: task.type === "change_availability_duration" ? task.durationMinutes : saved.durationMinutes,
+          ...(saved.facilityQuery === undefined ? {} : { facilityQuery: saved.facilityQuery }),
+          ...(saved.requiredFacilityLocations === undefined ? {} : { requiredFacilityLocations: saved.requiredFacilityLocations }),
+          ...(saved.requiredFacilityQueries === undefined ? {} : { requiredFacilityQueries: saved.requiredFacilityQueries }),
+          ...(saved.title === undefined ? {} : { title: saved.title }),
+          ...(saved.windowStart === undefined ? {} : { windowStart: saved.windowStart }),
+          ...(saved.windowEnd === undefined ? {} : { windowEnd: saved.windowEnd }),
+          excludeRequester: requesterExcluded };
+      }
+
+      if (titleInstruction !== undefined && (task.type === "find_availability" || task.type === "book_meeting")) {
+        task = { ...task, title: titleInstruction.title };
+      }
       // A profile default scopes a new search, but never replaces a room already
       // specified in the request or selected in the ongoing conversation.
       task = applyProfileFacilityDefault(task, validatedInput.defaultFacilityQuery, conversation?.context.facilityQuery);
@@ -973,7 +1120,7 @@ async function route(
       }
       if (task.type === "find_availability") {
         pendingMultiLocationCandidates.delete(conversationKey(validatedInput));
-        task = inheritAvailabilityPreferences(task, conversation?.context, validatedInput.prompt);
+        task = inheritAvailabilityPreferences(task, conversation?.context, validatedInput.prompt, membership);
         const requiredFacility = readRequiredFacilityRequest(validatedInput.prompt);
         if (requiredFacility !== undefined) {
           const { facilityQuery: _singleFacility, ...withoutSingleFacility } = task;
@@ -1066,8 +1213,8 @@ async function route(
         }
         assertSlotHasNotStarted(selectedSlot);
         task = {
-          type: "book_meeting", ...(conversation.facilityId === undefined ? {} : { facilityQuery: conversation.facilityId }),
-          title: conversation.context.title ?? "",
+          type: "book_meeting", ...((conversation.facilityId ?? conversation.context.facilityQuery) === undefined ? {} : { facilityQuery: conversation.facilityId ?? conversation.context.facilityQuery }),
+          title: titleInstruction?.title ?? conversation.context.title ?? "",
           sendEmail: structuredCommand?.sendEmail ?? true,
           selectedStart: selectedSlot.start, selectedEnd: selectedSlot.end,
         };
@@ -1095,7 +1242,7 @@ async function route(
           context: conversation.context,
         };
         // Deliberately not deleted: if the user changes their mind before
-        // manually clicking DeskNet's own "追加", show_candidates needs the
+        // manually clicking desknet's own "追加", show_candidates needs the
         // conversation's availability data to still be here.
         pendingBookings.set(conversationKey(validatedInput), clearTransientConversationFlags(conversation));
       } else if (task.type === "book_meeting") {
@@ -1128,9 +1275,9 @@ async function route(
         const bookingAvailability = getCompanyWideAvailability(conversation.context).map((candidate) => ({
           ...candidate, availableFacilityIds: candidate.availableFacilityIds.filter((id) => !excluded.includes(id)),
         }));
-        const { selectedStart, selectedEnd } = task;
+        const { selectedStart: requestedStart, selectedEnd: requestedEnd } = task;
         const slot = bookingAvailability.find(
-          (candidate) => candidate.start === selectedStart && candidate.end === selectedEnd,
+          (candidate) => candidate.start === requestedStart && candidate.end === requestedEnd,
         );
         if (slot === undefined || slot.availableFacilityIds.length === 0) {
           throw new TypeError(
@@ -1701,10 +1848,11 @@ function startRun(runId: string): void {
   }
 }
 
-function cancelSupersededApprovals(userId: string, threadId: string): void {
+function cancelSupersededApprovals(userId: string, threadId: string, includeManualCards = false): void {
   for (const [runId, run] of runs) {
     if (
-      run.status === "awaiting_approval" &&
+      (run.status === "awaiting_approval" ||
+        (includeManualCards && run.status === "awaiting_user_input" && run.result?.manualActionRequest !== undefined)) &&
       run.input.userId === userId &&
       run.input.threadId === threadId
     ) {
@@ -1713,7 +1861,7 @@ function cancelSupersededApprovals(userId: string, threadId: string): void {
         status: "cancelled",
         updatedAt: new Date().toISOString(),
         result: {
-          summary: "Cancelled because a newer DeskNet's request superseded this approval.",
+          summary: "Cancelled because a newer desknet's request superseded this approval.",
           assistantMessage: "新しい依頼が送信されたため、この確認は無効になりました。",
           evidence: run.result?.evidence ?? [],
         },
@@ -1753,6 +1901,14 @@ async function executeRun(runId: string): Promise<void> {
       ? multiUserDeskNetsEnabled() ? await personalWorker(running.input.userId) : deskNetsWorker
       : mockWorker;
     let completed = await worker.execute(running, controller.signal);
+    if (running.task?.type === "find_availability" && isRequesterMembershipOnlyInstruction(running.input.prompt) &&
+        completed.status === "completed" && completed.result?.assistantMessage) {
+      const acknowledgment = running.task.excludeRequester
+        ? "あなたを除外し、指定された参加者のみで空き時間を再確認しました。"
+        : "あなたを参加者に含めて、空き時間を再確認しました。";
+      completed = { ...completed, result: { ...completed.result,
+        assistantMessage: `${acknowledgment}\n${completed.result.assistantMessage}` } };
+    }
     if (
       completed.task?.type === "find_availability" &&
       completed.task.selectionMode === "earliest" &&
@@ -2002,8 +2158,8 @@ function normalizeFacilityName(value: string): string {
   return value.normalize("NFKC").replace(/\s+/g, "").toUpperCase();
 }
 
-// Default meeting-room preference by DeskNet's "代表組織" (primary
-// department, shown on each user's own DeskNet's profile page), tried in
+// Default meeting-room preference by desknet's "代表組織" (primary
+// department, shown on each user's own desknet's profile page), tried in
 // order when the request does not name a facility explicitly. An explicit
 // facility mention in the request always takes priority over this table.
 // Overridable at deploy time via the FACILITY_PREFERENCE_BY_ORGANIZATION
@@ -2023,15 +2179,15 @@ const FACILITY_PREFERENCE_BY_ORGANIZATION = parseFacilityPreferenceTable(
 
 // Per-person overrides for the rare case where someone's actual work
 // location doesn't match their organization's default (e.g. two people in
-// the same 営業統括部 based out of different offices). DeskNet's exposes no
+// the same 営業統括部 based out of different offices). desknet's exposes no
 // field more granular than 代表組織, so this is keyed by the requester's
-// DeskNet's display name and only needs an entry for known exceptions —
+// desknet's display name and only needs an entry for known exceptions —
 // everyone else falls through to FACILITY_PREFERENCE_BY_ORGANIZATION.
 // Overridable via the FACILITY_PREFERENCE_OVERRIDE_BY_USER environment
-// variable (same JSON shape, keyed by DeskNet's display name instead of
+// variable (same JSON shape, keyed by desknet's display name instead of
 // organization). Known exception not yet wired in: someone in 営業統括部
 // based at the 品川 office (default for that organization is 有玉) — add
-// them here, keyed by their exact DeskNet's display name, once known.
+// them here, keyed by their exact desknet's display name, once known.
 const DEFAULT_FACILITY_PREFERENCE_OVERRIDE_BY_USER: Record<string, string[]> = {};
 const FACILITY_PREFERENCE_OVERRIDE_BY_USER = parseFacilityPreferenceTable(
   "FACILITY_PREFERENCE_OVERRIDE_BY_USER",
@@ -2268,8 +2424,31 @@ export function buildRoomOnlyChangeTask(prompt: string, saved: PendingBookingCon
     selectedStart:start, selectedEnd:end };
 }
 
+
+
+export function isRequesterMembershipOnlyInstruction(prompt: string): boolean {
+  const text = prompt.normalize("NFKC").replace(/\s+/g, "")
+    .replace(/(?:今回の|この)?(?:会議|打ち合わせ|ミーティング)(?:には|に)(?=参加|出席|出ない|出ません)/g, "")
+    .replace(/[、。]*(?:(?:再び|もう一度|改めて|再度)?候補を?(?:ください|出して|見せて|表示して|教えて|お願いします))[。!！]*$/, "");
+  const self = "(?:私|わたし|わたくし|自分|僕|ぼく|俺)";
+  // Recognize a membership-only correction even when an optional time/meeting
+  // phrase is present, but never consume an additional person/date/room change.
+  const correctionOnly = new RegExp(`^(?:やっぱり[、。]*)?${self}(?:は|も|が|を)(?:今回は|今回の|この|明日の|今日の|会議には|会議に|打ち合わせには|打ち合わせに|ミーティングには|ミーティングに)*(?:(?:参加|出席)(?:できない|できません|できず|不可|しない|しません|します|する|で)?|欠席(?:する|します)?|行かない|行きません|出なくて(?:いい|よい)|入れて|含めて)(?:ので|なので|から|だから)?[、。]*(?:除外して|除いて|外して|入れて|含めて)?(?:ください)?[、。]*(?:候補を?(?:もう一度|改めて|再度)|再検索して|候補を出し直して)?[。!！]*$`);
+  if (correctionOnly.test(text) && readRequesterMembership(prompt) !== "unchanged") return true;
+  const instruction = new RegExp(`^(?:やっぱり[、。]*)?${self}(?:(?:は|も|が)?(?:参加|出席)(?:しない|しません|します|する|して)|(?:を|は)?(?:除外して|除いて|外して|含めて|入れて))(?:ので|から|ため)?[、。]*(?:(?:${self}|本人|登録者)を)?(?:除外して|除いて|外して|含めて|入れて|お願いします)?(?:ください)?[。!！]*$`);
+  return instruction.test(text) && (requestsRequesterExclusion(prompt) || requestsRequesterInclusion(prompt));
+}
+
+function sameParticipantNames(current: ParticipantSelector[], previous: ParticipantSelector[] | undefined): boolean {
+  if (previous === undefined || current.length !== previous.length) return false;
+  const key = (participant: ParticipantSelector) => JSON.stringify([participant.name, participant.organization ?? ""]);
+  const names = new Set(previous.map(key));
+  return current.every((participant) => names.has(key(participant)));
+}
+
 export function inheritAvailabilityPreferences(
   task: FindAvailabilityTask, previous: PendingBookingContext | undefined, prompt: string,
+  membership = readRequesterMembership(prompt),
 ): FindAvailabilityTask {
   if (!previous) return task;
   return {
@@ -2281,6 +2460,12 @@ export function inheritAvailabilityPreferences(
       ? { facilityType: previous.facilityType } : {}),
     ...(previous.selectionMode === "earliest" && readDurationMinutes(prompt) !== undefined
       ? { selectionMode: "earliest" as const } : {}),
+    // 代理予約の指定は、同じ参加者での条件変更なら、本人が参加すると明言するまで引き継ぐ。
+    // 参加者が異なる検索は新しい依頼として扱い、引き継がない。
+    ...(previous.excludeRequester && sameParticipantNames(task.participants, previous.participants) &&
+      membership !== "include"
+      ? { excludeRequester: true } : {}),
+    ...(membership === "include" ? { excludeRequester: false } : membership === "exclude" ? { excludeRequester: true } : {}),
     participants: task.participants.map(participant => {
       const saved = previous.participants?.find(p => p.name === participant.name);
       // Model-generated refinements omit the internal fallback flag. Keep it
@@ -2338,6 +2523,7 @@ export function buildParticipantCandidateRefinement(
       ? {}
       : { requiredFacilityQueries: saved.context.requiredFacilityQueries }),
     ...(saved.context.title === undefined ? {} : { title: saved.context.title }),
+    ...(saved.context.excludeRequester && !requestsRequesterInclusion(prompt) ? { excludeRequester: true } : {}),
   };
 }
 
@@ -2673,7 +2859,7 @@ function handleFacilityChoiceReply(
 // without that priority, a reply like "経営企画部ではなく三晃です" would
 // substring-match BOTH offered organizations, and picking whichever happens
 // to be first would silently resolve to the wrong one. Organizations that
-// are empty strings (DeskNet's exposed no department for that row) are
+// are empty strings (desknet's exposed no department for that row) are
 // never offered as matchable candidates: besides being unselectable, an
 // empty normalized string would otherwise substring-match any reply at all.
 export function matchOfferedOrganizations(
