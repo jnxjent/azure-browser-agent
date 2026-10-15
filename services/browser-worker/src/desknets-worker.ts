@@ -583,8 +583,7 @@ async function executeAvailabilityRun(
     }
     await cancelVisibleDialog(page, "利用設備");
 
-    const gcd = (a: number, b: number): number => b === 0 ? a : gcd(b, a % b);
-    const increment = gcd(gcd(30, task.bufferBeforeMinutes ?? 0), task.bufferAfterMinutes ?? 0);
+    const increment = schedulingIncrementMinutes(task.bufferBeforeMinutes, task.bufferAfterMinutes);
     const availabilityRequest = {
       bufferBeforeMinutes: task.bufferBeforeMinutes ?? 0,
       bufferAfterMinutes: task.bufferAfterMinutes ?? 0,
@@ -755,6 +754,7 @@ async function executeAvailabilityRun(
         task.endDate,
         task.durationMinutes,
         availability,
+        task,
       ),
       evidence: [
         observationBefore.screenshotRef,
@@ -1775,16 +1775,27 @@ function locateVisibleDialog(page: Page, label: string): Locator {
   return page.locator(".ui-dialog:visible");
 }
 
+export function schedulingIncrementMinutes(before = 0, after = 0): number {
+  const gcd = (a: number, b: number): number => b === 0 ? a : gcd(b, a % b);
+  return Math.max(5, gcd(gcd(30, before), after));
+}
+
 export function formatAvailabilityMessage(
   date: string,
   endDate: string,
   durationMinutes: number,
   availability: BookableAvailabilitySlot[] | Array<{ start: string; end: string }>,
+  buffers: { bufferBeforeMinutes?: number; bufferAfterMinutes?: number } = {},
 ): string {
+  const bufferDetails = [
+    buffers.bufferBeforeMinutes ? `前の予定の終了から${buffers.bufferBeforeMinutes}分` : "",
+    buffers.bufferAfterMinutes ? `次の予定の開始まで${buffers.bufferAfterMinutes}分` : "",
+  ].filter(Boolean);
+  const bufferNote = bufferDetails.length ? `${bufferDetails.join("、")}空ける条件です。\n` : "";
   const candidates = [...availability].sort((a, b) => Date.parse(a.start) - Date.parse(b.start)).slice(0, 50);
-  if (candidates.length === 0) return `${date}〜${endDate}は、現在以降に${durationMinutes}分の打ち合わせを設定できる候補がありません。`;
+  if (candidates.length === 0) return `${bufferNote}${date}〜${endDate}は、現在以降に${durationMinutes}分の打ち合わせを設定できる候補がありません。`;
   const lines = candidates.map((slot, index) => `${index + 1}. ${formatJapanDateTime(slot.start)}〜${formatJapanTime(slot.end)}（${durationMinutes}分）`);
-  return `${date}〜${endDate}の候補は開始時刻順です。${availability.length > 50 ? "先頭50件を表示します。" : ""}\n${lines.join("\n")}\n「では、1で」のように番号で選択してください。会議室は登録済みの優先順位、メール送信と本人への通知はオンを初期値にします。`;
+  return `${bufferNote}${date}〜${endDate}の候補は開始時刻順です。${availability.length > 50 ? "先頭50件を表示します。" : ""}\n${lines.join("\n")}\n「では、1で」のように番号で選択してください。会議室は登録済みの優先順位、メール送信と本人への通知はオンを初期値にします。`;
 }
 
 export function retainCandidateWindows<T extends { start: string; end: string }>(

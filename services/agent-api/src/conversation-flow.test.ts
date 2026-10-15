@@ -873,6 +873,7 @@ test("buffer correction refreshes candidates and invalidates old cards", async (
   process.env.DESKNETS_PARTICIPANT_ALIASES_PATH = join(aliasDirectory, "aliases.json");
   let modelCalls = 0;
   let invalidConditions = false;
+  let newSearch = false;
   let modeledBuffer: number | null = null;
   let modeledMembership: "include" | "exclude" | "unchanged" | "unclear" = "unchanged";
   globalThis.fetch = async (input, init) => {
@@ -881,11 +882,11 @@ test("buffer correction refreshes candidates and invalidates old cards", async (
       const latest = JSON.parse(JSON.parse(String(init?.body)).messages.at(-1).content);
       if (["はい", "いいえ"].includes(latest.latestUserMessage)) assert.equal(latest.savedSchedulingState.conversation.requesterMembershipQuestion, true);
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
-        intent: invalidConditions || /候補を出し直して|応接室の空きを/.test(latest.latestUserMessage) ? "find_availability" : latest.latestUserMessage.startsWith("候補1で") ? "select_booking_candidate" : "show_candidates",
+        intent: newSearch || invalidConditions || /候補を出し直して|応接室の空きを/.test(latest.latestUserMessage) ? "find_availability" : latest.latestUserMessage.startsWith("候補1で") ? "select_booking_candidate" : "show_candidates",
         bufferBeforeMinutes: modeledBuffer, bufferAfterMinutes: null,
         candidateNumber: 1,
-        participants: invalidConditions ? [] : [{name:"加藤恵子", organization:null}], dateStart:invalidConditions ? null : "2099-09-16",dateEnd:"2099-09-22",
-        durationMinutes:60,facilityQuery:"アクト応接室",title:"相談",
+        participants: newSearch ? [{name:"New Participant",organization:null}] : invalidConditions ? [] : [{name:"加藤恵子", organization:null}], dateStart:newSearch ? "2099-10-01" : invalidConditions ? null : "2099-09-16",dateEnd:newSearch ? "2099-10-03" : "2099-09-22",
+        durationMinutes:newSearch ? 90 : 60,facilityQuery:newSearch ? "New Room" :"アクト応接室",title:"相談",
         requesterMembership: modeledMembership,
         requesterMembershipEvidence: modeledMembership === "unchanged" ? null : JSON.parse(JSON.parse(String(init?.body)).messages.at(-1).content).latestUserMessage,
       }) } }] }), { status: 200 });
@@ -899,6 +900,16 @@ test("buffer correction refreshes candidates and invalidates old cards", async (
   DeskNetsBrowserWorker.prototype.execute = async (run: BrowserRun) => {
     if (run.task?.type === "find_availability") {
       searches++;
+      if (newSearch) {
+        assert.deepEqual(run.task.participants, [{name:"New Participant"}]);
+        assert.equal(run.task.date,"2099-10-01");
+        assert.equal(run.task.endDate,"2099-10-03");
+        assert.equal(run.task.durationMinutes,90);
+        assert.equal(run.task.facilityQuery,"New Room");
+        assert.equal(run.task.bufferBeforeMinutes,30);
+        assert.equal(run.task.bufferAfterMinutes ?? 0,0);
+        return {...run,status:"completed",result:{summary:"new search",evidence:[]}};
+      }
       assert.deepEqual(run.task.participants, [{ name: "加藤恵子" }]);
       assert.equal(run.task.date, "2099-09-16"); assert.equal(run.task.endDate, "2099-09-22");
       assert.equal(run.task.durationMinutes, 60); assert.equal(run.task.facilityQuery, "アクト応接室");
@@ -1013,6 +1024,16 @@ test("buffer correction refreshes candidates and invalidates old cards", async (
     await send("私は不参加です。アクト応接室の空きを調べて");
     assert.equal(searches, 11, "room-only shortcuts must not swallow a membership correction");
     assert.equal(modelCalls, 16, "the preliminary room interpretation is reused, not requested twice");
+    invalidConditions = true;
+    modeledBuffer = 20;
+    await send("Leave 20 minutes before the meeting");
+    invalidConditions = false;
+    newSearch = true;
+    modeledBuffer = 30;
+    const fresh = await send("Find New Participant in October for 90 minutes in New Room, leave 30 minutes before");
+    assert.equal(fresh.status,"completed",JSON.stringify(fresh));
+    assert.equal(searches,13);
+
   } finally {
     globalThis.fetch = originalFetch; DeskNetsBrowserWorker.prototype.execute = originalWorker;
     server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));

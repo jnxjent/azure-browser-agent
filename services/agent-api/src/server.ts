@@ -818,7 +818,11 @@ async function route(
     if (semanticAnalysis?.schedulingBuffer && savedConversation && (semanticAnalysis.task.type !== "clarify" || semanticAnalysis.taskValidationFailed)) {
       const saved = savedConversation.context;
       const { beforeMinutes, afterMinutes } = semanticAnalysis.schedulingBuffer;
-      semanticAnalysis = { ...semanticAnalysis, task: {
+      semanticAnalysis = { ...semanticAnalysis, task: semanticAnalysis.task.type === "find_availability" && !semanticAnalysis.taskValidationFailed ? {
+        ...semanticAnalysis.task,
+        ...(beforeMinutes == null ? {} : { bufferBeforeMinutes: beforeMinutes }),
+        ...(afterMinutes == null ? {} : { bufferAfterMinutes: afterMinutes }),
+      } : {
         type: "find_availability", participants: saved.participants ?? [],
         date: saved.date, endDate: saved.endDate ?? saved.date, durationMinutes: saved.durationMinutes,
         ...Object.fromEntries(Object.entries({ facilityQuery: saved.facilityQuery, requiredFacilityLocations: saved.requiredFacilityLocations,
@@ -2742,7 +2746,7 @@ export function buildShowCandidatesResponse(
     },
     result: {
       summary: `Re-displaying ${context.availability.length} availability candidates.`,
-      assistantMessage: `予約をキャンセルしました。${formatAvailabilityMessage(context.date, endDate, context.durationMinutes, context.availability)}`,
+      assistantMessage: `予約をキャンセルしました。${formatAvailabilityMessage(context.date, endDate, context.durationMinutes, context.availability, context)}`,
       evidence: [`Candidates: ${context.availability.length}`],
       availability: context.availability,
     },
