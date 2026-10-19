@@ -182,6 +182,43 @@ test("a surname with an unmatched department offers the actual people instead of
   } finally { await browser.close(); }
 });
 
+import { participantNameMatches, participantNameSearchVariants } from "./desknets-participants.js";
+
+test("full names accept ordinary separators without changing surname characters or selecting longer names", () => {
+  for (const requested of ["鴉 なぎさ", "鴉　なぎさ"]) {
+    assert.deepEqual(participantNameSearchVariants(requested), ["鴉なぎさ", "鴉 なぎさ", "鴉　なぎさ"]);
+    for (const candidate of ["鴉なぎさ", "鴉 なぎさ", "鴉　なぎさ"]) {
+      assert.equal(participantNameMatches(candidate, requested, "鴉なぎさ"), true);
+    }
+    assert.equal(participantNameMatches("烏なぎさ", requested, "鴉なぎさ"), false);
+    assert.equal(participantNameMatches("鴉なぎさ子", requested, "鴉なぎさ"), false);
+  }
+});
+
+test("participant selection searches a compact full name and accepts the spaced registered name", async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="co-sel-dialog">
+      <li class="co-sel-search"><a href="#">検索</a></li>
+      <input name="name"><input name="key">
+      <section class="co-sel-search co-sel-chooser-items"><div class="co-sel-list-scroll">
+        <table class="co-sel-table-list"><tbody></tbody></table>
+      </div></section></div>`);
+    await page.evaluate(() => {
+      document.querySelector('input[name="name"]')!.addEventListener("keydown", event => {
+        if ((event as KeyboardEvent).key !== "Enter") return;
+        const query = document.querySelector<HTMLInputElement>('input[name="name"]')!.value;
+        if (query !== "鴉なぎさ") throw new Error("Unexpected query");
+        document.querySelector("tbody")!.innerHTML = `<tr><td><span class="co-sel-name">鴉　なぎさ</span><span class="co-busyo-def">営業部</span></td><td class="co-sel-button"><button onclick="this.dataset.selected='true'">追加</button></td></tr>
+        <tr><td><span class="co-sel-name">鴉なぎさ子</span><span class="co-busyo-def">営業部</span></td></tr>`;
+      });
+    });
+    await selectParticipant(page.locator(".co-sel-dialog"), page, { name: "鴉 なぎさ" });
+    assert.equal(await page.locator("button[data-selected='true']").count(), 1);
+  } finally { await browser.close(); }
+});
+
 test("excluded-participant verification waits for the dialog and asynchronously loaded rows", async () => {
   const browser = await chromium.launch({ headless: true });
   try {

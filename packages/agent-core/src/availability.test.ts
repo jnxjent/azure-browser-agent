@@ -7,6 +7,26 @@ import {
   findMultiLocationAvailability,
 } from "./availability.js";
 
+it("recognizes office location aliases without mixing locations or ignoring room bookings", () => {
+  const request = {
+    window: { start: "2026-10-23T09:00:00+09:00", end: "2026-10-23T11:00:00+09:00" },
+    durationMinutes: 60,
+    schedules: [{ participantId: "鴉なぎさ", busy: [] }, { participantId: "浦手", busy: [] }],
+    facilities: [
+      { facilityId: "アクト大会議室", busy: [{ start: "2026-10-23T09:00:00+09:00", end: "2026-10-23T10:00:00+09:00" }] },
+      { facilityId: "有玉大会議室", busy: [] },
+    ],
+  };
+  for (const facilityQuery of ["アクトオフィス", "アクトのオフィス", "アクト事務所", "アクトの事務所"]) {
+    const slots = findBookableAvailability({ ...request, facilityQuery });
+    assert.equal(slots.length, 1);
+    assert.equal(slots[0]?.start, "2026-10-23T01:00:00.000Z");
+    assert.deepEqual(slots[0]?.availableFacilityIds, ["アクト大会議室"]);
+  }
+  assert.equal(findBookableAvailability({ ...request, facilityQuery: "アクト応接室" }).length, 0);
+  assert.equal(findBookableAvailability({ ...request, facilityQuery: "未知オフィス" }).length, 0);
+});
+
 it("requires people and a free room at both locations in the same hour", () => {
   const slots = findMultiLocationAvailability({
     window: { start: "2026-10-05T09:00:00+09:00", end: "2026-10-05T12:00:00+09:00" },

@@ -30,7 +30,7 @@ import {
   mergeParticipantScheduleObservations,
 } from "./desknets-dom.js";
 import { keepMeetingRoomFacilities } from "./desknets-facilities.js";
-import { removeRequesterFromRegistration, resolveSelfOrganizationParticipants, preferParticipantOrganization, participantNameSearchVariants } from "./desknets-participants.js";
+import { removeRequesterFromRegistration, resolveSelfOrganizationParticipants, preferParticipantOrganization, participantNameSearchVariants, participantNameMatches } from "./desknets-participants.js";
 import { readCompanyHolidays } from "./desknets-holidays.js";
 import { readMeetingHours } from "./meeting-hours.js";
 import { resolveLiveRoomChange } from "./room-change.js";
@@ -1346,7 +1346,7 @@ export async function selectParticipant(
       break;
     }
     const nameMatches = candidates
-      .filter((candidate) => candidate.name?.startsWith(searchName))
+      .filter((candidate) => participantNameMatches(candidate.name, selector.name, searchName))
       .map((candidate) => ({ row: rows.nth(candidate.index), name: candidate.name!, organization: candidate.organization }));
     if (nameMatches.length === 0) continue;
     sawNameMatch = true;

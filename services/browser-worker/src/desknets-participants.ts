@@ -62,9 +62,23 @@ function normalizeOrganizationForLookup(value: string): string {
 
 /** The common spelling 高田 refers to 髙田 in this workflow. */
 export function participantNameSearchVariants(name: string): string[] {
-  if (name.startsWith("高田")) return [`髙田${name.slice(2)}`, name];
-  if (name.startsWith("髙田")) return [name, `高田${name.slice(2)}`];
-  return [name];
+  const normalized = name.normalize("NFKC").trim();
+  const spellings = normalized.startsWith("高田")
+    ? [`髙田${normalized.slice(2)}`, normalized]
+    : normalized.startsWith("髙田") ? [normalized, `高田${normalized.slice(2)}`] : [normalized];
+  return [...new Set(spellings.flatMap(spelling => [
+    spelling.replace(/\s+/g, ""), spelling, spelling.replace(/\s+/g, "　"),
+  ]))];
+}
+
+/** Ignore name separators, while retaining every character of the requested name. */
+export function participantNameMatches(candidate: string | null, requested: string, searchName: string): boolean {
+  if (candidate === null) return false;
+  const compact = (value: string) => value.normalize("NFKC").replace(/\s+/g, "");
+  const actual = compact(candidate);
+  const expected = compact(searchName);
+  // An explicitly separated surname + given name must not select a longer name.
+  return /\s/.test(requested.trim()) ? actual === expected : actual.startsWith(expected);
 }
 
 /** Remove only a uniquely identified requester using the UI's explicit remove control. */

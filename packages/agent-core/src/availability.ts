@@ -284,6 +284,14 @@ function matchesFacilityQuery(
   normalizedQuery: string,
 ): boolean {
   const normalizedFacilityId = normalizeFacilityName(facilityId);
+  // Office/site names describe a location, not a literal meeting-room name.
+  // Only known locations qualify, so an actual room name is never shortened.
+  const officeLocation = KNOWN_FACILITY_LOCATIONS.find(location =>
+    ["オフィス", "のオフィス", "事務所", "の事務所"].some(suffix => normalizedQuery === location + suffix),
+  );
+  if (officeLocation !== undefined) {
+    return KNOWN_FACILITY_LOCATIONS.find(location => normalizedFacilityId.startsWith(location)) === officeLocation;
+  }
   const genericRoomAtLocation = normalizedQuery.match(/^(.+?)の(会議室|応接室)$/);
   if (genericRoomAtLocation !== null) {
     const [, requestedLocation, requestedType] = genericRoomAtLocation;
