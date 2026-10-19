@@ -6,6 +6,7 @@ import {
   assertActionAllowed,
   assertRunAllowed,
   filterFutureAvailability,
+  facilityMatchesQuery,
   findBookableAvailability,
   findCommonAvailability,
   findMultiLocationAvailability,
@@ -1711,12 +1712,11 @@ function resolveFacility(
   query: string,
   availability: BookableAvailabilitySlot[],
 ): string {
-  const normalizedQuery = normalizeFacilityName(query);
   const facilityIds = new Set(
     availability.flatMap((slot) => slot.availableFacilityIds),
   );
   const matches = Array.from(facilityIds).filter((facilityId) =>
-    normalizeFacilityName(facilityId).includes(normalizedQuery),
+    facilityMatchesQuery(facilityId, query),
   );
   if (matches.length === 0) throw new Error(`設備が見つからないか、空きがありません: ${query}`);
   if (matches.length > 1) throw new Error(`設備名が曖昧です: ${matches.join("、")}`);

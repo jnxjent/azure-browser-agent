@@ -9,6 +9,7 @@ import {
   analyzeDeskNetsIntent,
   readAzureOpenAIIntentConfig,
   filterFutureAvailability,
+  facilityMatchesQuery,
   parseDeskNetsTask,
   requestsRequesterInclusion,
   requestsRequesterExclusion,
@@ -2159,12 +2160,11 @@ function resolveConversationFacility(
   query: string,
   availability: BookableAvailabilitySlot[],
 ): string {
-  const normalizedQuery = normalizeFacilityName(query);
   const facilityIds = new Set(
     availability.flatMap((slot) => slot.availableFacilityIds),
   );
   const matches = Array.from(facilityIds).filter((facilityId) =>
-    normalizeFacilityName(facilityId).includes(normalizedQuery),
+    facilityMatchesQuery(facilityId, query),
   );
   if (matches.length === 0) {
     throw new TypeError(`設備が見つからないか、空きがありません: ${query}`);
@@ -2352,7 +2352,7 @@ export function resolveAutomaticFacilityForSlot(
     );
     if (exact !== undefined) return exact;
     candidates = candidates.filter((facilityId) =>
-      normalizeFacilityName(facilityId).includes(normalizedQuery),
+      facilityMatchesQuery(facilityId, query!),
     );
     if (candidates.length === 0) {
       throw new TypeError(`設備が見つからないか、空きがありません: ${query}`);

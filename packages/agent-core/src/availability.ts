@@ -279,6 +279,10 @@ function normalizeFacilityName(value: string): string {
   return value.normalize("NFKC").replace(/\s+/g, "").toUpperCase();
 }
 
+export function facilityMatchesQuery(facilityId: string, query: string): boolean {
+  return matchesFacilityQuery(facilityId, normalizeFacilityName(query));
+}
+
 function matchesFacilityQuery(
   facilityId: string,
   normalizedQuery: string,

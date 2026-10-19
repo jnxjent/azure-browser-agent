@@ -615,6 +615,16 @@ describe("resolveTimeOnlySelection", () => {
 
 
 describe("resolveAutomaticFacilityForSlot", () => {
+  it("resolves office aliases to an available room in the requested location for the card", () => {
+    for (const location of ["アクト", "有玉", "品川", "御殿山"]) {
+      const room = `${location}大会議室`;
+      for (const query of [location, `${location}オフィス`, `${location}のオフィス`]) {
+        assert.equal(resolveAutomaticFacilityForSlot(query, slot([room, "別拠点会議室"]), undefined, undefined), room);
+      }
+    }
+    assert.throws(() => resolveAutomaticFacilityForSlot("アクトオフィス", slot(["有玉大会議室"]), undefined, undefined), /空きがありません/);
+    assert.throws(() => resolveAutomaticFacilityForSlot("アクト応接室", slot(["アクト大会議室"]), undefined, undefined), /空きがありません/);
+  });
   it("chooses the preferred available room within an explicitly requested location", () => {
     assert.equal(
       resolveAutomaticFacilityForSlot(

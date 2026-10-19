@@ -81,7 +81,7 @@ test("Japanese thread: availability → start only → duration only → final a
     return run;
   };
   try {
-    await send("2099年9月16日に私と髙田部長で打ち合わせ可能な日程を教えて");
+    await send("2099年9月16日に私と髙田部長で打ち合わせ可能な日程を教えて。会議室はアクトオフィスで");
     const numbered = await send("では上記１で。");
     assert.equal(numbered.status, "awaiting_approval", JSON.stringify(numbered));
     assert.equal(numbered.result?.approvalRequest?.facilityId, "アクトミーティングルームC");
