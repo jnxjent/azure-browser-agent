@@ -21,7 +21,7 @@ const fixture = `<!doctype html><meta charset="utf-8">
  <button onclick="document.getElementById('form').hidden=true;document.getElementById('list').hidden=false">キャンセル</button>
 </div>
 <div id="people" class="ui-dialog co-sel-dialog" hidden>
- <div class="co-sel-bottom"><table><tbody><tr><td class="name-text">本人</td><td style="width:240px">空き</td></tr></tbody></table></div>
+ <div class="co-sel-bottom"><table><tbody><tr><td class="name-text" data-refid="user123">本人</td><td style="width:240px">空き</td></tr></tbody></table></div>
  <button onclick="document.getElementById('people').hidden=true">OK</button>
 </div>
 <div id="rooms" class="ui-dialog" hidden>
@@ -31,7 +31,10 @@ const fixture = `<!doctype html><meta charset="utf-8">
  </tr><tr><td><span class="sch-entry-plant-name">会議室B</span><input type="checkbox" value="14"></td><td style="width:240px">空き</td></tr></tbody></table></div>
  <button onclick="applyRooms();document.getElementById('rooms').hidden=true">OK</button>
  <button onclick="document.getElementById('rooms').hidden=true">キャンセル</button>
-</div><script>window.registrations=0;function applyRooms(){
+</div><script>window.desknets={MODULE_API_MAIN:1,getUrl:()=>'/read',ajax:{getItems:items=>items,rest:options=>{
+if(options.data.cmd!=='schprivate'||options.data.proc!=='d'||options.data.id!=='123')throw Error('Unexpected subject read');
+options.success({slist:{item:[]}});
+}}};window.registrations=0;function applyRooms(){
 const selected=Array.from(document.querySelectorAll('#rooms tr')).filter(row=>row.querySelector('input').checked);
 document.getElementById('chosen').textContent=selected.map(row=>row.querySelector('.sch-entry-plant-name').textContent).join('、');
 const plants=document.getElementById('plants');plants.replaceChildren();
