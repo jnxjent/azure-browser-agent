@@ -26,7 +26,7 @@ export function participantBusyIntervals(row: Pick<ExtractedTimelineRow, "timeli
     return [{ start: new Date(start).toISOString(), end: new Date(start + 86_400_000).toISOString() }];
   }
   const interval = (from:number,to:number) => ({start:new Date(start+from*3_600_000).toISOString(),end:new Date(start+to*3_600_000).toISOString()});
-  const leave = halfDay.flatMap(half => [...(half.morning?[interval(9,13)]:[]),...(half.afternoon?[interval(14,18)]:[])]);
+  const leave = halfDay.flatMap(half => [...(half.morning?[interval(9,13)]:[]),...(half.afternoon?[interval(13,18)]:[])]);
   // A half-day entry can be drawn across the whole timeline. Replace only that
   // entry's geometry, retaining every other appointment's actual busy hours.
   const blocks = row.blocks.filter((_,index) => !halfDay[index]?.morning && !halfDay[index]?.afternoon);

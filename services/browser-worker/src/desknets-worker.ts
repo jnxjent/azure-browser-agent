@@ -33,6 +33,7 @@ import {
 import { keepMeetingRoomFacilities } from "./desknets-facilities.js";
 import { removeRequesterFromRegistration, resolveSelfOrganizationParticipants, preferParticipantOrganization, participantNameSearchVariants, participantNameMatches } from "./desknets-participants.js";
 import { readCompanyHolidays } from "./desknets-holidays.js";
+import { readParticipantSubjectSchedules } from "./desknets-subjects.js";
 import { readMeetingHours } from "./meeting-hours.js";
 import { resolveLiveRoomChange } from "./room-change.js";
 import { ensureSingleDeskNetsTab } from "./desknets-tabs.js";
@@ -1260,8 +1261,10 @@ async function openAvailabilityForm(
   const selectedParticipantIds = await selectedRows.evaluateAll((rows) =>
     rows.map((row) => row.querySelector(".name-text")?.textContent?.trim() ?? ""),
   );
+  // Read actual subjects, including untimed leave omitted from the bars.
+  // A failed detail read stops the search instead of suggesting unchecked slots.
   const schedulesByParticipant = new Map(
-    observedSchedules.map((schedule) => [schedule.participantId, schedule]),
+    (await readParticipantSubjectSchedules(page, dayStart)).map((schedule) => [schedule.participantId, schedule]),
   );
   return selectedParticipantIds.map((participantId) => {
     const schedule = schedulesByParticipant.get(participantId);
