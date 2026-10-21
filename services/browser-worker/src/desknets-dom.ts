@@ -12,6 +12,25 @@ interface ExtractedTimelineRow {
   label: string;
   timelineWidthPx: number;
   blocks: TimelineBlock[];
+  appointmentLabels: string[];
+}
+
+/** Half-day leave uses fixed JST hours; unqualified leave excludes the date. */
+export function participantBusyIntervals(row: Pick<ExtractedTimelineRow, "timelineWidthPx" | "blocks" | "appointmentLabels">, dayStart: string) {
+  const start = Date.parse(dayStart);
+  if (!Number.isFinite(start)) throw new TypeError("dayStart must be a valid date-time.");
+  const labels = row.appointmentLabels.map(label => label.normalize("NFKC").replace(/\s+/g, ""));
+  const halfDay = labels.map(label => ({morning:label.includes("午前半休"),afternoon:label.includes("午後半休")}));
+  // Qualifiers belong to one appointment: another full-day leave still wins.
+  if (labels.some((label,index) => !halfDay[index]!.morning && !halfDay[index]!.afternoon && /有休|有給休暇|休み/.test(label))) {
+    return [{ start: new Date(start).toISOString(), end: new Date(start + 86_400_000).toISOString() }];
+  }
+  const interval = (from:number,to:number) => ({start:new Date(start+from*3_600_000).toISOString(),end:new Date(start+to*3_600_000).toISOString()});
+  const leave = halfDay.flatMap(half => [...(half.morning?[interval(9,13)]:[]),...(half.afternoon?[interval(14,18)]:[])]);
+  // A half-day entry can be drawn across the whole timeline. Replace only that
+  // entry's geometry, retaining every other appointment's actual busy hours.
+  const blocks = row.blocks.filter((_,index) => !halfDay[index]?.morning && !halfDay[index]?.afternoon);
+  return [...convertTimelineBlocksToIntervals({dayStart,timelineWidthPx:row.timelineWidthPx,blocks}),...leave];
 }
 
 export function mergeParticipantScheduleObservations(
@@ -23,9 +42,8 @@ export function mergeParticipantScheduleObservations(
   );
   for (const schedule of current) {
     const remembered = schedules.get(schedule.participantId);
-    if (remembered === undefined || schedule.busy.length > 0) {
-      schedules.set(schedule.participantId, schedule);
-    }
+    const busy = [...(remembered?.busy ?? []), ...schedule.busy];
+    schedules.set(schedule.participantId, {...schedule, busy:Array.from(new Map(busy.map(interval=>[`${interval.start}/${interval.end}`,interval])).values())});
   }
   return Array.from(schedules.values());
 }
@@ -38,11 +56,7 @@ export async function extractParticipantSchedules(
   const rows = await extractRows(table, ".name-text");
   return rows.map((row) => ({
     participantId: row.label,
-    busy: convertTimelineBlocksToIntervals({
-      dayStart,
-      timelineWidthPx: row.timelineWidthPx,
-      blocks: row.blocks,
-    }),
+    busy: participantBusyIntervals(row, dayStart),
   }));
 }
 
@@ -91,7 +105,12 @@ async function extractRows(
         const lastRect = lastCell.getBoundingClientRect();
         const label = row.querySelector(selector)?.textContent?.trim() ?? "";
         const timelineWidthPx = lastRect.right - firstRect.left;
-        const blocks = Array.from(row.querySelectorAll<HTMLElement>(".sch-item")).map(
+        const appointments = Array.from(row.querySelectorAll<HTMLElement>(".sch-item"));
+        const appointmentLabels = appointments.map(item => [
+          item.textContent ?? "", item.getAttribute("title") ?? "", item.getAttribute("aria-label") ?? "",
+          ...Array.from(item.querySelectorAll("[title],[aria-label]")).flatMap(child => [child.getAttribute("title") ?? "",child.getAttribute("aria-label") ?? ""]),
+        ].join(" "));
+        const blocks = appointments.map(
           (item) => {
             const rect = item.getBoundingClientRect();
             return {
@@ -101,7 +120,7 @@ async function extractRows(
           },
         );
 
-        return { label, timelineWidthPx, blocks };
+        return { label, timelineWidthPx, blocks, appointmentLabels };
       }),
     labelSelector,
   );
