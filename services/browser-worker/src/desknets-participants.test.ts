@@ -2,8 +2,18 @@ import { chromium } from "playwright";
 import { removeRequesterFromRegistration } from "./desknets-participants.js";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { resolveSelfOrganizationParticipants, preferParticipantOrganization, participantNameSearchVariants } from "./desknets-participants.js";
+import { resolveSelfOrganizationParticipants, preferParticipantOrganization, participantNameSearchVariants, participantFallbackQueries, participantFullNameMatches } from "./desknets-participants.js";
 import { companyHolidayDates } from "./desknets-holidays.js";
+
+it("broadens compact full-name queries while accepting only the complete identity",()=>{
+  assert.deepEqual(participantFallbackQueries("樋口麗"),["樋口"]);
+  assert.deepEqual(participantFallbackQueries("樋口 麗"),["樋口"]);
+  assert.deepEqual(participantFallbackQueries("樋口"),[]);
+  assert.equal(participantFullNameMatches("樋口　麗","樋口麗"),true);
+  assert.equal(participantFullNameMatches("樋口 麗子","樋口麗"),false);
+  assert.equal(participantFullNameMatches("樋口","樋口麗"),false);
+  assert.equal(participantFullNameMatches("樋口 舞","樋口麗"),false);
+});
 
 it("maps the common Takada spelling to 髙田 before trying the entered spelling", () => {
   assert.deepEqual(participantNameSearchVariants("高田"), ["髙田", "高田"]);

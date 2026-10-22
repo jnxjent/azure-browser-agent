@@ -318,3 +318,34 @@ test("search completion distinguishes empty, stale, repeated and failed response
     await prepare('failure');await assert.rejects(searchParticipantResults(dialog,page,'田中',1000),/田中さんの検索結果を確認できません/);
   }finally{await browser.close();}
 });
+
+test("compact full names fall back to a broad query but never select a different given name",async()=>{
+  const browser=await chromium.launch({headless:true});
+  try {
+    for(const duplicate of [false,true]) {
+      const page=await browser.newPage();
+      await page.setContent(`<div class="co-sel-dialog"><li class="co-sel-search"><a href="#">検索</a></li><input name="name"><input name="key"><section class="co-sel-search co-sel-chooser-items"><div class="co-sel-list-scroll"><table class="co-sel-table-list"><tbody></tbody></table></div><p id="empty" hidden>該当するユーザーはいません</p></section></div>`);
+      await page.evaluate(duplicate=>{
+        const input=document.querySelector<HTMLInputElement>('input[name=name]')!,body=document.querySelector('tbody')!,table=document.querySelector('table')!,empty=document.querySelector<HTMLElement>('#empty')!;
+        (window as any).searches=[];
+        input.addEventListener('keydown',event=>{
+          if(event.key!=='Enter')return;
+          (window as any).searches.push(input.value);
+          const found=input.value==='樋口';table.hidden=!found;empty.hidden=found;
+          const names=duplicate?['樋口　麗','樋口 麗']:['樋口','樋口 麗子','樋口 舞','樋口　麗'];
+          body.innerHTML=found?names.map((name,index)=>`<tr><td><span class="co-sel-name">${name}</span><span class="co-busyo-def">部署${index}</span></td><td class="co-sel-button"><button onclick="this.dataset.selected='true'">追加</button></td></tr>`).join(''):'';
+        });
+      },duplicate);
+      if(duplicate) {
+        await assert.rejects(()=>selectParticipant(page.locator('.co-sel-dialog'),page,{name:'樋口麗'}),/ambiguous/);
+        assert.equal(await page.locator('button[data-selected=true]').count(),0);
+      }else {
+        await selectParticipant(page.locator('.co-sel-dialog'),page,{name:'樋口麗'});
+        assert.equal(await page.locator('button[data-selected=true]').count(),1);
+        assert.equal(await page.locator('button[data-selected=true]').locator('../..').locator('.co-sel-name').textContent(),'樋口　麗');
+      }
+      assert.deepEqual(await page.evaluate(()=>(window as any).searches),['樋口麗','樋口']);
+      await page.close();
+    }
+  }finally{await browser.close();}
+});

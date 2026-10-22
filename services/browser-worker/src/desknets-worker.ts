@@ -31,7 +31,7 @@ import {
   mergeParticipantScheduleObservations,
 } from "./desknets-dom.js";
 import { keepMeetingRoomFacilities } from "./desknets-facilities.js";
-import { removeRequesterFromRegistration, resolveSelfOrganizationParticipants, preferParticipantOrganization, participantNameSearchVariants, participantNameMatches } from "./desknets-participants.js";
+import { removeRequesterFromRegistration, resolveSelfOrganizationParticipants, preferParticipantOrganization, participantNameSearchVariants, participantNameMatches, participantFallbackQueries, participantFullNameMatches } from "./desknets-participants.js";
 import { readCompanyHolidays } from "./desknets-holidays.js";
 import { readParticipantSubjectSchedules } from "./desknets-subjects.js";
 import { readMeetingHours } from "./meeting-hours.js";
@@ -1312,7 +1312,8 @@ export async function selectParticipant(
   let sawNameMatch = false;
   let matches: Array<{ row: Locator; name: string; organization: string }> = [];
   let unmatchedCandidates: Array<{ name: string; organization: string }> = [];
-  for (const searchName of participantNameSearchVariants(selector.name)) {
+  const searches=[...participantNameSearchVariants(selector.name).map(name=>({name,fullNameOnly:false})),...participantFallbackQueries(selector.name).map(name=>({name,fullNameOnly:true}))];
+  for (const {name:searchName,fullNameOnly} of searches) {
     await nameField.fill(searchName);
     // The submit input can show an unrelated listing; Enter submits the name form.
     if(await searchParticipantResults(dialog,page,searchName)==="empty")continue;
@@ -1328,7 +1329,7 @@ export async function selectParticipant(
       };
     }));
     const exactNameMatches = candidates
-      .filter((candidate) => candidate.name === searchName)
+      .filter((candidate) => participantFullNameMatches(candidate.name,selector.name))
       .map((candidate) => ({ row: rows.nth(candidate.index), name: candidate.name!, organization: candidate.organization }));
     if (exactNameMatches.length > 0) {
       // A complete name identifies the person when unique. Department labels
@@ -1338,6 +1339,9 @@ export async function selectParticipant(
       matches = exactNameMatches;
       break;
     }
+    // Prefix searches may retrieve many people. Accept only the complete
+    // requested name, ignoring separators; never accept the surname alone.
+    if(fullNameOnly)continue;
     const nameMatches = candidates
       .filter((candidate) => participantNameMatches(candidate.name, selector.name, searchName))
       .map((candidate) => ({ row: rows.nth(candidate.index), name: candidate.name!, organization: candidate.organization }));

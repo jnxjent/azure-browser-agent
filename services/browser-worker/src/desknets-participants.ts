@@ -81,6 +81,17 @@ export function participantNameMatches(candidate: string | null, requested: stri
   return /\s/.test(requested.trim()) ? actual === expected : actual.startsWith(expected);
 }
 
+/** Broaden only the query, never the identity accepted from its results. */
+export function participantFallbackQueries(requested:string):string[] {
+  return [...new Set(participantNameSearchVariants(requested).map(name=>name.replace(/\s+/g,"")).filter(name=>Array.from(name).length>2).map(name=>Array.from(name).slice(0,2).join("")))];
+}
+
+export function participantFullNameMatches(candidate:string|null,requested:string):boolean {
+  if(candidate===null)return false;
+  const compact=(value:string)=>value.normalize("NFKC").replace(/\s+/g,"");
+  return participantNameSearchVariants(requested).some(name=>compact(candidate)===compact(name));
+}
+
 /** Remove only a uniquely identified requester using the UI's explicit remove control. */
 export async function removeRequesterFromRegistration(page: Page, displayName: string | undefined): Promise<string> {
   if (!displayName?.trim()) throw new Error("登録者の表示名を確認できないため、本人を除外できません。再検索してください。");
