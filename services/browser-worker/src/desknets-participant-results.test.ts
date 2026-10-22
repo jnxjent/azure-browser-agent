@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chromium } from "playwright";
-import { participantResultsBaseline, participantResultsTable } from "./desknets-participant-results.js";
+import { participantResultsBaseline, participantResultsTable, searchParticipantResults } from "./desknets-participant-results.js";
 import { retainCandidateWindows, selectParticipant, buildRoomAvailabilityResult, cardParticipants, verifyExcludedRegistrationParticipants } from "./desknets-worker.js";
 
 test("participant refinement retains only the previously displayed time windows", () => {
@@ -66,12 +66,14 @@ test("participant search maps 高田 to 髙田 and retries when zero results hid
       const nameField = document.querySelector<HTMLInputElement>('input[name="name"]')!;
       const body = document.querySelector<HTMLTableSectionElement>('tbody')!;
       const table = body.closest("table")!;
+      const empty=document.createElement("p");empty.hidden=true;empty.textContent="該当するユーザーはいません";table.parentElement!.append(empty);
       (window as typeof window & { searches: string[] }).searches = [];
       nameField.addEventListener("keydown", event => {
         if (event.key !== "Enter") return;
         const query = nameField.value;
         (window as typeof window & { searches: string[] }).searches.push(query);
         table.hidden = query !== foundName;
+        empty.hidden = query === foundName;
         body.innerHTML = query === foundName
           ? `<tr><td><span class="co-sel-name">${foundName}廣明</span><span class="co-busyo-def">経営企画部</span></td><td class="co-sel-button"><button type="button" onclick="this.dataset.selected = 'true'">追加</button></td></tr>`
           : "";
@@ -277,4 +279,42 @@ test("proxy booking omits only the requester from card participants and handoff 
   assert.deepEqual(cardParticipants(base, ["101", "201", "301"]), { participantIds: ["秘書", "田中", "鈴木"], nativeUserIds: ["101", "201", "301"] });
   // Missing native IDs stay missing.
   assert.deepEqual(cardParticipants({ ...base, excludedRequesterId: "秘書" }), { participantIds: ["田中", "鈴木"] });
+});
+
+test("search completion distinguishes empty, stale, repeated and failed responses without a 30-second locator wait", async()=>{
+  const browser=await chromium.launch({headless:true});
+  try {
+    const page=await browser.newPage();
+    await page.route('https://desk.example/**',route=>route.fulfill({contentType:'text/html',body:'<div class="co-sel-dialog"><input name="name"><section class="co-sel-search co-sel-chooser-items"><div class="co-sel-list-scroll"><table class="co-sel-table-list"><tbody><tr><td><span class="co-sel-name">田中</span></td></tr></tbody></table></div></section></div>'}));
+    const prepare=async(mode:string)=>{
+      await page.goto('https://desk.example/');
+      await page.evaluate(mode=>{
+        document.querySelector('input')!.addEventListener('keydown',async event=>{
+          if((event as KeyboardEvent).key!=='Enter')return;
+          const table=document.querySelector('table')!,body=document.querySelector('tbody')!;
+          if(mode==='stale')return;
+          if(mode==='same'){body.innerHTML=body.innerHTML;return;}
+          if(mode==='hidden'){table.hidden=true;return;}
+          try {
+            const response=await fetch('/search?name='+encodeURIComponent((document.querySelector('input') as HTMLInputElement).value));
+            if(!response.ok)return;
+            body.innerHTML='';table.hidden=true;
+          }catch{/* Failure must not be rendered as an empty result. */}
+        });
+      },mode);
+      await page.locator('input').fill('田中');
+    };
+    const dialog=page.locator('.co-sel-dialog');
+    await prepare('same');assert.equal(await searchParticipantResults(dialog,page,'田中',1000),'results');
+    for(const mode of ['stale','hidden']) {
+      await prepare(mode);const start=Date.now();
+      await assert.rejects(searchParticipantResults(dialog,page,'田中',500),/田中さんの検索結果を確認できません/);
+      assert.ok(Date.now()-start<2000,'the inner read cannot wait for the default 30 seconds');
+    }
+    await page.route('https://desk.example/search?**',route=>route.fulfill({contentType:'application/json',body:'{"items":[]}'}));
+    await prepare('empty');assert.equal(await searchParticipantResults(dialog,page,'田中',1500),'empty');
+    await page.unroute('https://desk.example/search?**');
+    await page.route('https://desk.example/search?**',route=>route.abort());
+    await prepare('failure');await assert.rejects(searchParticipantResults(dialog,page,'田中',1000),/田中さんの検索結果を確認できません/);
+  }finally{await browser.close();}
 });

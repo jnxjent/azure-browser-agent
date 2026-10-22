@@ -21,12 +21,13 @@ const PARTICIPANT_TITLE =
   "(?:代表取締役|執行役員|取締役|副社長|社長|会長|本部長|支店長|副部長|副支店長|部長|次長|課長|室長|所長|係長|主任|専務|常務|マネージャー|リーダー)";
 const PARTICIPANT_SUFFIX = `(?:さん|${PARTICIPANT_TITLE})`;
 const PARTICIPANT_WITH_ORGANIZATION = new RegExp(
-  `(?:^|[\\s、,，・]|と)(?:(${ORGANIZATION_NAME})の)?([々一-龯髙﨑]{1,12}?)(?:${PARTICIPANT_SUFFIX})?(?=$|[\\s、,，・]|と|で|だけ|[がはをに]|の(?:空き|空いて|スケジュール|予定|打ち合わせ|会議|直近|最短|一番早|最も早|今日|明日|今週|来週))`,
+  `(?:^|[\\s、,，・]|と)(?!(?:私|自分|本人)と)(?:(${ORGANIZATION_NAME})の)?(?:([々一-龯髙﨑ぁ-ゖァ-ヺー]{1,24}?)(${PARTICIPANT_SUFFIX})|([々一-龯髙﨑]{1,12}?))(?=$|[\\s、,，・]|と|で|だけ|[がはをに]|の(?:空き|空いて|スケジュール|予定|打ち合わせ|会議|直近|最短|一番早|最も早|今日|明日|今週|来週))`,
   "g",
 );
 const PARTICIPANT_SUFFIX_AT_END = new RegExp(`${PARTICIPANT_SUFFIX}$`);
 
 const NON_PARTICIPANT_WORDS = new Set([
+  "みんな", "あとで", "ください", "について", "スケジュール", "ミーティング", "以下", "以上",
   "私",
   "本人",
   "今日",
@@ -187,14 +188,27 @@ export function normalizeParticipantName(value: string): string {
 }
 
 function readParticipants(prompt: string): ParticipantSelector[] {
-  const participants = Array.from(prompt.matchAll(PARTICIPANT_WITH_ORGANIZATION), (match) => {
-    const name = match[2]?.trim();
+  const matches=Array.from(prompt.matchAll(PARTICIPANT_WITH_ORGANIZATION));
+  // A standalone line in an explicit multiline list may be an unadorned
+  // mixed-script full name. Do not widen ordinary prose into name tokens.
+  const listed=prompt.includes("\n")?Array.from(prompt.matchAll(/(?:^|\n)[\t ]*([々一-龯髙﨑ぁ-ゖァ-ヺー]{1,24})[\t ]*(?=\r?$|\n)/g)).filter(match=>
+    /[々一-龯髙﨑]/.test(match[1]!) && /[ぁ-ゖァ-ヺー]/.test(match[1]!) && !PARTICIPANT_SUFFIX_AT_END.test(match[1]!) && !matches.some(existing=>existing.index!>=match.index!&&existing.index!<match.index!+match[0].length)) : [];
+  const participants = matches.map((match) => {
+    const name = (match[2] ?? match[4])?.trim();
     if (name === undefined || name === "" || isNonParticipantWord(name)) return undefined;
+    // Kana-only words need an honorific; mixed-script full names in explicit
+    // participant lists remain supported without one.
+    if (!match[3] && !/[々一-龯髙﨑]/.test(name)) return undefined;
     const organization = match[1]?.trim();
     return organization === undefined || organization === ""
       ? { name }
       : { name, organization };
   }).filter((selector): selector is ParticipantSelector => selector !== undefined);
+  for(const match of listed) {
+    if(!isNonParticipantWord(match[1]!))participants.push({name:match[1]!});
+  }
+  // Preserve the user-entered order when a kana-containing line was added.
+  participants.sort((a,b)=>prompt.indexOf(a.name)-prompt.indexOf(b.name));
 
   const keys = participants.map((selector) => `${selector.name}:${selector.organization ?? ""}`);
   if (new Set(keys).size !== keys.length) {

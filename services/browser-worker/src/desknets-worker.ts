@@ -39,7 +39,7 @@ import { resolveLiveRoomChange } from "./room-change.js";
 import { ensureSingleDeskNetsTab } from "./desknets-tabs.js";
 import { openFacilityDialog } from "./desknets-facility-dialog.js";
 import { assertFacilityAvailable } from "./desknets-facility-conflicts.js";
-import { participantResultsTable, participantResultsBaseline } from "./desknets-participant-results.js";
+import { participantResultsTable, searchParticipantResults } from "./desknets-participant-results.js";
 import { loadDeskNetsCredentials } from "./desknets-credentials.js";
 import { DeskNetsAuthentication, DeskNetsAuthenticationError, isHttpAuthError, isLoginPage } from "./desknets-auth.js";
 
@@ -1313,20 +1313,9 @@ export async function selectParticipant(
   let matches: Array<{ row: Locator; name: string; organization: string }> = [];
   let unmatchedCandidates: Array<{ name: string; organization: string }> = [];
   for (const searchName of participantNameSearchVariants(selector.name)) {
-    const previousResultsHtml = await participantResultsBaseline(resultsTable);
     await nameField.fill(searchName);
     // The submit input can show an unrelated listing; Enter submits the name form.
-    await nameField.press("Enter");
-    // DeskNet's hides the entire result table when a name has zero matches.
-    // That is expected for the first spelling; continue with the alternate.
-    try {
-      await resultsTable.waitFor({ state: "visible", timeout: 10_000 });
-    } catch (error) {
-      if (error instanceof errors.TimeoutError && (await resultsTable.count()) === 0) continue;
-      throw error;
-    }
-    await waitForResultsToRefresh(resultsTable, previousResultsHtml);
-    await page.waitForTimeout(300);
+    if(await searchParticipantResults(dialog,page,searchName)==="empty")continue;
 
     // Retain row indices and strict name matching before any organization filter.
     const candidates = await rows.evaluateAll((elements) => elements.map((row, index) => {
@@ -1360,7 +1349,7 @@ export async function selectParticipant(
   }
 
   if (matches.length === 0) {
-    if (!sawNameMatch) throw new Error(`Participant was not found: ${selector.name}`);
+    if (!sawNameMatch) throw new Error(`${selector.name}さんが見つかりませんでした。氏名・所属をご確認ください。`);
     if (unmatchedCandidates.length > 0) {
       throw new AmbiguousParticipantError(selector.name, unmatchedCandidates, selector.organization);
     }
@@ -1376,22 +1365,14 @@ export async function selectParticipant(
   }
 
   const matchedRow = matches[0] as { row: Locator; name: string; organization: string };
+  const currentNames=await matchedRow.row.locator("span.co-sel-name").allTextContents();
+  if(currentNames.length!==1 || currentNames[0]!.trim()!==matchedRow.name) {
+    throw new Error(`${selector.name}さんの検索結果が変わったため、選択を中止しました。再度お試しください。`);
+  }
   const addControl = matchedRow.row.locator("td.co-sel-button").getByText("追加", { exact: true });
   if ((await addControl.count()) !== 1) throw new Error(`Add control was not found for: ${selector.name}`);
   await addControl.click({ noWaitAfter: true });
   await page.waitForTimeout(350);
-}
-
-async function waitForResultsToRefresh(
-  resultsTable: Locator,
-  previousHtml: string,
-  timeoutMs = 8_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if ((await resultsTable.innerHTML()) !== previousHtml) return;
-    await new Promise((resolve) => setTimeout(resolve, 150));
-  }
 }
 
 async function openParticipantDialog(page: Page): Promise<void> {
@@ -1910,6 +1891,7 @@ export async function recordFailure(directory: string, page: Page | undefined, p
       return {
         command: new URLSearchParams(location.hash.slice(1)).get("cmd"),
         dates: Array.from(document.querySelectorAll<HTMLInputElement>(".jsch-startdate,.jsch-enddate")).map(e => ({value:e.value,visible:visible(e)})),
+        participantSearch: Array.from(document.querySelectorAll<HTMLInputElement>('.co-sel-dialog input[name="name"]')).filter(visible).map(e=>e.value),
         dialogs: Array.from(document.querySelectorAll<HTMLElement>(".ui-dialog")).filter(visible).map(e => e.innerText.slice(0, 1500)),
       };
     }).catch(() => null), new Promise<null>(resolve => setTimeout(() => resolve(null), 2000))]);

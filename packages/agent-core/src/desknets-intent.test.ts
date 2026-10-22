@@ -2,6 +2,26 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { parseDeskNetsTask, readDurationMinutes, requestsRequesterExclusion, requestsRequesterInclusion } from "./desknets-intent.js";
 
+describe("kana and mixed-script participant names",()=>{
+  const people=(prompt:string)=>{
+    const task=parseDeskNetsTask(prompt,new Date('2026-10-22T00:00:00Z'));
+    assert.equal(task.type,'find_availability');
+    if(task.type!=='find_availability')throw Error('Unexpected task');
+    return task.participants;
+  };
+  it("recognizes kana with honorifics without carrying organization to the next person",()=>{
+    assert.deepEqual(people('さくらさんと田中さんの来週の空き'),[{name:'さくら'},{name:'田中'}]);
+    assert.deepEqual(people('営業部の田中みゆきさんとエミリーさんの来週の空き'),[{name:'田中みゆき',organization:'営業部'},{name:'エミリー'}]);
+    assert.deepEqual(people('さとみさんと田中さとみさんの来週の空き'),[{name:'さとみ'},{name:'田中さとみ'}]);
+  });
+  it("keeps all three unadorned full names in the reported multiline prompt",()=>{
+    assert.deepEqual(people('11/24の週で、以下が皆スケジュールの空いている枠を教えて。時間は60分。\n神谷咲季\n塩澤さつき\n樋口麗'),[{name:'神谷咲季'},{name:'塩澤さつき'},{name:'樋口麗'}]);
+  });
+  it("does not promote ordinary kana words to participants",()=>{
+    for(const text of ['みんなのスケジュール','あとで空きを教えてください','スケジュールについて','ミーティングの空き'])assert.throws(()=>parseDeskNetsTask(text),/参加者名/);
+  });
+});
+
 describe("readDurationMinutes", () => {
   it("distinguishes clock minutes from meeting duration", () => {
     for (const text of ["16時30分", "１６時 ３０分開始で", "午後4時半で"]) {
