@@ -1,6 +1,16 @@
 import type { DeskNetsTask, ParticipantSelector } from "./contracts.js";
 import { readMeetingTitleInstruction } from "./meeting-title.js";
 
+/** Business half-days; a qualified clock time such as 午後4時 is not a half-day request. */
+export function readAvailabilityHalfDay(prompt: string): { windowStart?: string; windowEnd?: string } {
+  const text = prompt.normalize("NFKC");
+  const morning = /午前(?!\s*[0-9一二三四五六七八九十])/.test(text);
+  const afternoon = /午後(?!\s*[0-9一二三四五六七八九十])/.test(text);
+  if (morning === afternoon) return {};
+  return morning ? { windowStart: "09:00", windowEnd: "12:00" }
+    : { windowStart: "13:00", windowEnd: "18:00" };
+}
+
 // Exported so other packages (e.g. the facility-preference inference in
 // agent-api) can strip the same organizational suffixes without maintaining
 // a second, potentially drifting copy of this list.
@@ -85,6 +95,7 @@ export function parseDeskNetsTask(
       facilityQuery: readFacilityQuery(normalized),
       ...readDateRange(normalized, now),
       durationMinutes: readDurationMinutes(normalized) ?? 60,
+      ...readAvailabilityHalfDay(normalized),
     };
   }
 
@@ -115,6 +126,7 @@ export function parseDeskNetsTask(
     participants,
     ...readDateRange(normalized, now),
     durationMinutes: durationMinutes ?? 60,
+    ...readAvailabilityHalfDay(normalized),
     ...(facilityQuery === undefined ? {} : { facilityQuery }),
     ...(title === undefined ? {} : { title }),
     ...(/(?:直近|最短|一番早|最も早)/.test(normalized)

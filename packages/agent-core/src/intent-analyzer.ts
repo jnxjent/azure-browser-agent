@@ -1,5 +1,5 @@
 import type { DeskNetsTask } from "./contracts.js";
-import { normalizeParticipantName, parseDeskNetsTask, readRequesterMembership, type RequesterMembership } from "./desknets-intent.js";
+import { normalizeParticipantName, parseDeskNetsTask, readAvailabilityHalfDay, readRequesterMembership, type RequesterMembership } from "./desknets-intent.js";
 
 export interface IntentAnalysis {
   schedulingBuffer?: { beforeMinutes: number | null; afterMinutes: number | null };
@@ -266,6 +266,7 @@ function validateStructuredIntent(value: StructuredIntent, membership: Requester
       date,
       endDate,
       durationMinutes: readDuration(value.durationMinutes),
+      ...readAvailabilityHalfDay(prompt),
       ...(value.facilityQuery === null ? {} : { facilityQuery: readText(value.facilityQuery, "facilityQuery") }),
       ...(title === undefined ? {} : { title }),
     };

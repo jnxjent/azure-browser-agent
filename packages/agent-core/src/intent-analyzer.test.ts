@@ -5,6 +5,25 @@ import { analyzeDeskNetsIntent } from "./intent-analyzer.js";
 const config = { endpoint: "https://example.openai.azure.com", apiKey: "test-key", deployment: "intent-model" };
 
 describe("analyzeDeskNetsIntent", () => {
+  it("retains explicit business half-days when the model output omits time restrictions", async () => {
+    for (const [period, start, end] of [["午前", "09:00", "12:00"], ["午後", "13:00", "18:00"]]) {
+      const result = await analyzeDeskNetsIntent(`鈴木強真さんと2人で打ち合わせしたい。10/27～30の${period}で30分設定したいので日程候補教えて`, new Date("2026-10-26T09:00:00+09:00"), {
+        config, requireLlm: true,
+        fetchImplementation: async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+          intent: "find_availability", participants: [{ name: "鈴木強真", organization: null }],
+          dateStart: "2026-10-27", dateEnd: "2026-10-30", durationMinutes: 30,
+          facilityQuery: null, candidateNumber: null, sendEmail: null, title: null,
+          selectedStart: null, selectedEnd: null,
+        }) } }] }), { status: 200 }),
+      });
+      assert.equal(result.source, "azure_openai");
+      assert.equal(result.task.type, "find_availability");
+      if (result.task.type !== "find_availability") throw new Error("Expected availability search");
+      assert.equal(result.task.windowStart, start);
+      assert.equal(result.task.windowEnd, end);
+      assert.equal(result.task.endDate, "2026-10-30");
+    }
+  });
   it("preserves dialogue and asks for clarification instead of silently reparsing after an LLM failure", async () => {
     const result = await analyzeDeskNetsIntent("さっきの続きで", new Date(), {
       config, requireLlm: true,

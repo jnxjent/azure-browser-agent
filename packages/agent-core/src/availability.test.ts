@@ -1,11 +1,29 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { readAvailabilityHalfDay } from "./desknets-intent.js";
 import {
   filterFutureAvailability,
   findBookableAvailability,
   findCommonAvailability,
   findMultiLocationAvailability,
 } from "./availability.js";
+
+it("keeps every 30-minute candidate, including its end, inside the requested business half-day", () => {
+  for (const [period, start, end, count] of [["午前", "09:00", "12:00", 6], ["午後", "13:00", "18:00", 10]] as const) {
+    const window = readAvailabilityHalfDay(`10/27～30の${period}で`);
+    const slots = findCommonAvailability({
+      window: { start: `2026-10-27T${window.windowStart}:00+09:00`, end: `2026-10-27T${window.windowEnd}:00+09:00` },
+      durationMinutes: 30,
+      schedules: [{ participantId: "本人", busy: [] }, { participantId: "鈴木強真", busy: [] }],
+    });
+    assert.equal(slots.length, count);
+    for (const slot of slots) {
+      assert.ok(Date.parse(slot.start) >= Date.parse(`2026-10-27T${start}:00+09:00`));
+      assert.ok(Date.parse(slot.end) <= Date.parse(`2026-10-27T${end}:00+09:00`));
+    }
+    assert.equal(Date.parse(slots.at(-1)!.end), Date.parse(`2026-10-27T${end}:00+09:00`));
+  }
+});
 
 it("recognizes office location aliases without mixing locations or ignoring room bookings", () => {
   const request = {

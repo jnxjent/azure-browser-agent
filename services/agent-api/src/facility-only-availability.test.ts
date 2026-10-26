@@ -4,6 +4,12 @@ import { parseFacilityOnlyAvailability } from "./facility-only-availability.js";
 
 const now = new Date("2026-09-29T09:00:00+09:00");
 
+test("room-only morning searches end at noon", () => {
+  const task = parseFacilityOnlyAvailability("10月27日以降、午前でアクト中会議室を30分確保できる日程を教えてください", null, now);
+  assert.equal(task?.windowStart, "09:00");
+  assert.equal(task?.windowEnd, "12:00");
+});
+
 test("turns the reported room question into a bounded read-only facility search", () => {
   assert.deepEqual(parseFacilityOnlyAvailability(
     "10月５日以降、午後でアクト中会議室を２時間確保できる日程を教えてください",
@@ -14,8 +20,8 @@ test("turns the reported room question into a bounded read-only facility search"
     date: "2026-10-05",
     endDate: "2026-10-11",
     durationMinutes: 120,
-    windowStart: "12:00",
-    windowEnd: "17:00",
+    windowStart: "13:00",
+    windowEnd: "18:00",
   });
 });
 

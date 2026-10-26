@@ -1,6 +1,23 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseDeskNetsTask, readDurationMinutes, requestsRequesterExclusion, requestsRequesterInclusion } from "./desknets-intent.js";
+import { parseDeskNetsTask, readAvailabilityHalfDay, readDurationMinutes, requestsRequesterExclusion, requestsRequesterInclusion } from "./desknets-intent.js";
+
+describe("business half-day search windows", () => {
+  it("keeps the reported participant prompt within the requested half-day", () => {
+    for (const [period, start, end] of [["午前", "09:00", "12:00"], ["午後", "13:00", "18:00"]]) {
+      const task = parseDeskNetsTask(`鈴木強真さんと2人で打ち合わせしたい。10/27～30の${period}で30分設定したいので日程候補教えて`, new Date("2026-10-26T09:00:00+09:00"));
+      assert.equal(task.type, "find_availability");
+      if (task.type !== "find_availability") throw new Error("Expected availability search");
+      assert.equal(task.windowStart, start);
+      assert.equal(task.windowEnd, end);
+    }
+  });
+  it("does not treat a clock time or both half-days as one restricted half-day", () => {
+    for (const prompt of ["午後4時", "午前９時", "午前と午後", "指定なし"]) {
+      assert.deepEqual(readAvailabilityHalfDay(prompt), {});
+    }
+  });
+});
 
 describe("kana and mixed-script participant names",()=>{
   const people=(prompt:string)=>{

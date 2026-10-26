@@ -1,4 +1,4 @@
-import type { FindRoomAvailabilityTask } from "@azure-browser-agent/agent-core";
+import { readAvailabilityHalfDay, type FindRoomAvailabilityTask } from "@azure-browser-agent/agent-core";
 
 const DAY_MS = 86_400_000;
 
@@ -61,7 +61,8 @@ export function parseFacilityOnlyAvailability(
     date,
     endDate: addDays(date, 6),
     durationMinutes,
-    windowStart: /午後/.test(text) ? "12:00" : "09:00",
-    windowEnd: "17:00",
+    windowStart: "09:00",
+    windowEnd: "18:00",
+    ...readAvailabilityHalfDay(text),
   };
 }
