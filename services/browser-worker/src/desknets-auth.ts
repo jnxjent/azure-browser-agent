@@ -14,6 +14,17 @@ export function isHttpAuthError(error: unknown): boolean {
 const EXPIRED_SESSION_WARNING =
   "要求された処理にアクセスできません。権限の変更が発生したかセッションが切れた可能性があります。作業を中断し、最初からやり直してください。";
 
+export class DeskNetsSessionExpiredError extends Error {
+  constructor() { super("desknet'sの処理途中でセッション・アクセス権の警告を検知しました。"); this.name = "DeskNetsSessionExpiredError"; }
+}
+export async function hasExpiredSessionWarning(page: Page): Promise<boolean> {
+  const dialogs = await page.locator(".ui-dialog:visible").allTextContents();
+  return dialogs.some(text => text.replace(/\s+/g, "").includes(EXPIRED_SESSION_WARNING));
+}
+export async function assertNoExpiredSessionWarning(page: Page): Promise<void> {
+  if (await hasExpiredSessionWarning(page)) throw new DeskNetsSessionExpiredError();
+}
+
 /** Attaches only for a worker operation; never changes the user's Edge profile. */
 export class DeskNetsAuthentication {
   private static basicSubmissionTail: Promise<void> = Promise.resolve();
@@ -140,9 +151,8 @@ export class DeskNetsAuthentication {
 
   async recoverExpiredSessionWarning(): Promise<boolean> {
     this.signal.throwIfAborted();
-    const warning = this.page.locator(".ui-dialog:visible").filter({
-      hasText: EXPIRED_SESSION_WARNING,
-    });
+    if (!await hasExpiredSessionWarning(this.page)) return false;
+    const warning = this.page.locator(".ui-dialog:visible").filter({ hasText: /要求された処理にアクセスできません/ });
     if (await warning.count() !== 1) return false;
 
     // Leave the stale, unsaved form by navigation. Clicking its Cancel button
@@ -152,6 +162,10 @@ export class DeskNetsAuthentication {
     if (schedule.origin !== this.origin) throw new DeskNetsAuthenticationError();
     schedule.search = "?cmd=schindex";
     schedule.hash = "cmd=schweekgrp";
+    // Leave the document first: same-fragment navigation can retain stale state,
+    // while reload could repeat a prior POST. The target navigation must be GET.
+    await this.page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 });
+    this.signal.throwIfAborted();
     await this.page.goto(schedule.href, {
       waitUntil: "domcontentloaded",
       timeout: 15_000,

@@ -41,7 +41,7 @@ import { openFacilityDialog } from "./desknets-facility-dialog.js";
 import { assertFacilityAvailable } from "./desknets-facility-conflicts.js";
 import { participantResultsTable, searchParticipantResults } from "./desknets-participant-results.js";
 import { loadDeskNetsCredentials } from "./desknets-credentials.js";
-import { DeskNetsAuthentication, DeskNetsAuthenticationError, isHttpAuthError, isLoginPage } from "./desknets-auth.js";
+import { DeskNetsAuthentication, DeskNetsAuthenticationError, assertNoExpiredSessionWarning, hasExpiredSessionWarning, isHttpAuthError, isLoginPage } from "./desknets-auth.js";
 
 class RetryAfterAuthentication extends Error {}
 
@@ -123,6 +123,7 @@ export class DeskNetsBrowserWorker implements RunExecutor {
     let page: Page | undefined;
     let preservePreparedForm = false;
     let primaryError: unknown;
+    let sessionRecovered = false;
     let authentication: DeskNetsAuthentication | undefined;
     try {
       if (run.task === undefined) {
@@ -213,6 +214,19 @@ export class DeskNetsBrowserWorker implements RunExecutor {
       if (signal.aborted) throw signal.reason;
       if (isHttpAuthError(error)) throw new DeskNetsAuthenticationError("desknet's入口のBASIC認証が必要です。VMで認証するか、保存した認証情報を更新してください。");
       authentication?.assertHealthy();
+      if (page && authentication && await hasExpiredSessionWarning(page).catch(() => false)) {
+        await recordFailure(artifactDirectory, page, "session-warning", error);
+        // Retry only read-only searches, from the beginning, at most once in execute().
+        // Never replay a booking or an approved handoff after an uncertain result.
+        if (run.input.mode !== "read" || !["find_availability", "find_room_availability"].includes(run.task?.type ?? "") || run.approval?.approvedAt !== undefined) {
+          throw new DeskNetsAuthenticationError("desknet'sがセッション・アクセス権の警告を表示しました。認証を確認して候補検索からやり直してください。");
+        }
+        if (!await authentication.recoverExpiredSessionWarning()) throw new DeskNetsAuthenticationError();
+        await authentication.recoverLogin();
+        signal.throwIfAborted();
+        sessionRecovered = true;
+        throw new RetryAfterAuthentication();
+      }
       if (!(error instanceof DeskNetsAuthenticationError) && page && authentication && await isLoginPage(page).catch(() => false)) {
         await authentication.recoverLogin();
         throw new RetryAfterAuthentication();
@@ -222,7 +236,7 @@ export class DeskNetsBrowserWorker implements RunExecutor {
       throw error;
     } finally {
       await authentication?.dispose();
-      if (page !== undefined && !page.isClosed() && !preservePreparedForm && !await isLoginPage(page).catch(() => true)) {
+      if (page !== undefined && !page.isClosed() && !preservePreparedForm && !sessionRecovered && !await isLoginPage(page).catch(() => true)) {
         try {
           await discardPreparedForm(page);
         } catch (cleanupError) {
@@ -1116,6 +1130,7 @@ exit 3
 }
 
 export async function ensureScheduleList(page: Page): Promise<void> {
+  await assertNoExpiredSessionWarning(page);
   await dismissUnsavedNavigationConfirmation(page);
   if ((await page.locator(".jsch-startdate:visible").count()) === 1) {
     await discardPreparedForm(page);
@@ -1908,6 +1923,7 @@ export async function recordFailure(directory: string, page: Page | undefined, p
 }
 
 export async function discardPreparedForm(page: Page): Promise<void> {
+  await assertNoExpiredSessionWarning(page);
   if (await dismissUnsavedNavigationConfirmation(page)) return;
   const dialog = page.locator(".ui-dialog:visible");
   if ((await dialog.count()) === 1) {
@@ -1932,11 +1948,17 @@ export async function discardPreparedForm(page: Page): Promise<void> {
     }
     return;
   }
-  await formCancel.click({ noWaitAfter: true });
+  try {
+    await formCancel.click({ noWaitAfter: true, timeout: 5_000 });
+  } catch (error) {
+    await assertNoExpiredSessionWarning(page);
+    throw error;
+  }
 
   const visibleForm = page.locator(".jsch-startdate:visible");
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
+    await assertNoExpiredSessionWarning(page);
     // The app can hide the form before showing/closing its confirmation.
     // Resolve the specific discard prompt before considering cleanup complete.
     if (await dismissUnsavedNavigationConfirmation(page)) return;

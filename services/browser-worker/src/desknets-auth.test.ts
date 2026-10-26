@@ -100,6 +100,25 @@ test("expired-session warning abandons the stale form and then permits saved-log
   }
 });
 
+test("warning recovery always uses a fresh GET and never repeats a previous POST", async () => {
+  const browser=await chromium.launch({headless:true});
+  try {
+    const page=await browser.newPage();let posts=0,gets=0;
+    const warning='要求された処理にアクセスできません。\n権限の変更が発生したかセッションが切れた可能性があります。作業を中断し、最初からやり直してください。';
+    await page.route('https://desk.example/**',route=>{
+      if(route.request().method()==='POST') {posts++;return route.fulfill({contentType:'text/html; charset=utf-8',body:`<div class="ui-dialog">${warning}</div>`});}
+      gets++;
+      return route.fulfill({contentType:'text/html; charset=utf-8',body:new URL(route.request().url()).pathname==='/entry'?'<form method="post" action="/dneo.cgi?cmd=schindex#cmd=schweekgrp"><button>continue</button></form>':'<div>氏名/組織名</div>'});
+    });
+    await page.goto('https://desk.example/entry');await page.getByRole('button',{name:'continue'}).click();
+    const auth=new DeskNetsAuthentication(page,undefined,'https://desk.example',new AbortController().signal);
+    assert.equal(await auth.recoverExpiredSessionWarning(),true);
+    assert.equal(posts,1,'recovery must never resubmit the previous document POST');
+    assert.equal(gets,2);
+    assert.equal(await page.getByText('氏名/組織名').count(),1);
+  }finally{await browser.close();}
+});
+
 test("separate personal contexts can pass the shared BASIC entrance concurrently", async () => {
   const f = await fixture();
   const browser = await chromium.launch({ headless: true });
@@ -107,7 +126,13 @@ test("separate personal contexts can pass the shared BASIC entrance concurrently
     const contexts = await Promise.all([browser.newContext(), browser.newContext()]);
     await Promise.all(contexts.map(async (context) => {
       const page = await context.newPage();
-      const auth = new DeskNetsAuthentication(page, f.lease, f.origin, new AbortController().signal);
+      // BASIC is shared, but application-login lockout belongs to each user.
+      const appBlocks = new Set<string>();
+      const lease: CredentialLease = { credentials:f.lease.credentials,
+        blocked:kind=>kind==="basic"?f.lease.blocked(kind):Promise.resolve(appBlocks.has(kind)),
+        block:kind=>kind==="basic"?f.lease.block(kind):Promise.resolve(void appBlocks.add(kind)),
+        clear:kind=>kind==="basic"?f.lease.clear(kind):Promise.resolve(void appBlocks.delete(kind)) };
+      const auth = new DeskNetsAuthentication(page, lease, f.origin, new AbortController().signal);
       try {
         await auth.attach();
         await page.goto(`${f.origin}/dneo.cgi?cmd=schindex`);
