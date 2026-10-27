@@ -32,6 +32,7 @@ import {
 } from "./desknets-dom.js";
 import { keepMeetingRoomFacilities } from "./desknets-facilities.js";
 import { removeRequesterFromRegistration, resolveSelfOrganizationParticipants, preferParticipantOrganization, participantNameSearchVariants, participantNameMatches, participantFallbackQueries, participantFullNameMatches } from "./desknets-participants.js";
+import { readParticipantNativeId, readSelectedParticipantIdentities } from "./desknets-participants.js";
 import { readCompanyHolidays } from "./desknets-holidays.js";
 import { readParticipantSubjectSchedules } from "./desknets-subjects.js";
 import { readMeetingHours } from "./meeting-hours.js";
@@ -365,7 +366,7 @@ async function executeRoomAvailabilityRun(
       type: "find_availability", participants: [], date, endDate: date,
       durationMinutes: task.durationMinutes,
     });
-    registrationParticipantIds = registrationSchedules.map(schedule => schedule.participantId);
+    registrationParticipantIds = registrationSchedules.schedules.map(schedule => schedule.participantId);
     await confirmVisibleDialog(page, "登録先");
     await openFacilityDialog(page);
     const facilities = keepMeetingRoomFacilities(deduplicateFacilitySchedules(
@@ -493,12 +494,15 @@ async function executeAvailabilityRun(
     if (task.autoExtendSearch && holidays.has(date)) continue;
     if (task.autoExtendSearch) task.endDate = date;
     let participantSchedules: ParticipantSchedule[];
+    let expectedParticipantRows: number;
     if (index > 0) {
       await discardPreparedForm(page);
       await ensureScheduleList(page);
     }
     try {
-      participantSchedules = await openAvailabilityForm(page, { ...task, date, endDate: date }, userDisplayName);
+      const selection = await openAvailabilityForm(page, { ...task, date, endDate: date }, userDisplayName);
+      participantSchedules = selection.schedules;
+      expectedParticipantRows = selection.expectedRows;
     } catch (error) {
       if (error instanceof AmbiguousParticipantError) {
         if (error.participantIndex === undefined) {
@@ -547,7 +551,7 @@ async function executeAvailabilityRun(
       }));
     }
     participantRowCount = participantSchedules.length;
-    if (participantRowCount !== task.participants.length + (task.excludeRequester ? 0 : 1)) {
+    if (participantRowCount !== expectedParticipantRows) {
       throw new Error(`Unexpected participant rows after requester selection: ${participantRowCount}.`);
     }
     const distinctParticipantIds = new Set(participantSchedules.map((schedule) => schedule.participantId));
@@ -1214,11 +1218,11 @@ async function readCurrentUserProfile(page: Page): Promise<CurrentUserProfile> {
   }
 }
 
-async function openAvailabilityForm(
+export async function openAvailabilityForm(
   page: Page,
   task: FindAvailabilityTask,
   requesterDisplayName?: string,
-): Promise<ParticipantSchedule[]> {
+): Promise<{ schedules: ParticipantSchedule[]; expectedRows: number }> {
   const currentUser = page.locator('input[type="checkbox"]:visible').first();
   if ((await currentUser.count()) !== 1) throw new Error("Current user schedule row was not found.");
   if (!(await currentUser.isChecked())) await currentUser.click({ noWaitAfter: true });
@@ -1238,6 +1242,12 @@ async function openAvailabilityForm(
   await dialog.waitFor({ state: "visible", timeout: 10_000 });
   await page.waitForTimeout(1_500);
 
+  const initial = await readSelectedParticipantIdentities(dialog);
+  if (initial.length !== 1) throw new Error('最初に選択された本人を一意に確認できません。再検索してください。');
+  const requesterId = initial[0]!.id;
+  const expectedIds = new Set([requesterId]);
+  const requestedIds = new Set<string>();
+
   const dayStart = `${task.date}T00:00:00+09:00`;
   let observedSchedules: ParticipantSchedule[] = [];
   const rememberVisibleSchedules = async (): Promise<void> => {
@@ -1255,7 +1265,25 @@ async function openAvailabilityForm(
   for (let index = 0; index < task.participants.length; index += 1) {
     const selector = task.participants[index] as ParticipantSelector;
     try {
-      await selectParticipant(dialog, page, selector);
+      const before = await readSelectedParticipantIdentities(dialog);
+      const resolved = await selectParticipant(dialog, page, selector, requesterId);
+      const after = await readSelectedParticipantIdentities(dialog);
+      const added = after.filter(person => !before.some(previous => previous.id === person.id));
+      if (before.some(person => !after.some(current => current.id === person.id)) || added.length > 1) {
+        throw new Error('参加者の選択状態が変わったため、検索を中止しました。再検索してください。');
+      }
+      const id = resolved.nativeId ?? (added.length === 1 ? added[0]!.id : undefined);
+      if (!id || !after.some(person => person.id === id) || (added.length === 1 && added[0]!.id !== id)) {
+        throw new Error('指定した参加者のユーザーIDを確認できません。再検索してください。');
+      }
+      if (id === requesterId && task.excludeRequester) {
+        throw new Error('本人が参加者に指定されていますが、本人除外も指定されています。どちらかを指定してください。');
+      }
+      if (requestedIds.has(id) && id !== requesterId) {
+        throw new Error('同じ参加者が重複して指定されています。参加者を確認してください。');
+      }
+      requestedIds.add(id);
+      expectedIds.add(id);
     } catch (error) {
       // selectParticipant doesn't know its own position in task.participants,
       // but the caller (executeAvailabilityRun) needs it to update only the
@@ -1268,7 +1296,12 @@ async function openAvailabilityForm(
     await rememberVisibleSchedules();
   }
   if (task.excludeRequester) await removeRequesterFromRegistration(page, requesterDisplayName);
-  const expectedRows = task.participants.length + (task.excludeRequester ? 0 : 1);
+  if (task.excludeRequester) expectedIds.delete(requesterId);
+  const expectedRows = expectedIds.size;
+  const finalIdentities = await readSelectedParticipantIdentities(dialog);
+  if (finalIdentities.length !== expectedRows || finalIdentities.some(person => !expectedIds.has(person.id))) {
+    throw new Error('指定した参加者と選択中のユーザーIDが一致しません。再検索してください。');
+  }
   const selectedRows = dialog.locator(".co-sel-bottom table tbody tr");
   if ((await selectedRows.count()) !== expectedRows) {
     throw new Error(`Expected ${expectedRows} selected participant rows.`);
@@ -1281,13 +1314,14 @@ async function openAvailabilityForm(
   const schedulesByParticipant = new Map(
     (await readParticipantSubjectSchedules(page, dayStart)).map((schedule) => [schedule.participantId, schedule]),
   );
-  return selectedParticipantIds.map((participantId) => {
+  const schedules = selectedParticipantIds.map((participantId) => {
     const schedule = schedulesByParticipant.get(participantId);
     if (schedule === undefined) {
       throw new Error(`No schedule observation was captured for ${participantId}.`);
     }
     return schedule;
   });
+  return { schedules, expectedRows };
 }
 
 // Thrown instead of a plain Error when a requested name (with no
@@ -1314,7 +1348,8 @@ export async function selectParticipant(
   dialog: Locator,
   page: Page,
   selector: ParticipantSelector,
-): Promise<void> {
+  requesterId?: string,
+): Promise<{ name: string; nativeId?: string }> {
   const searchTab = dialog.locator("li.co-sel-search a").first();
   await searchTab.click({ noWaitAfter: true });
   const nameField = dialog.locator('input[name="name"]:visible').first();
@@ -1388,10 +1423,13 @@ export async function selectParticipant(
   if(currentNames.length!==1 || currentNames[0]!.trim()!==matchedRow.name) {
     throw new Error(`${selector.name}さんの検索結果が変わったため、選択を中止しました。再度お試しください。`);
   }
+  const nativeId = await readParticipantNativeId(matchedRow.row);
+  if (nativeId !== undefined && nativeId === requesterId) return { name: matchedRow.name, nativeId };
   const addControl = matchedRow.row.locator("td.co-sel-button").getByText("追加", { exact: true });
   if ((await addControl.count()) !== 1) throw new Error(`Add control was not found for: ${selector.name}`);
   await addControl.click({ noWaitAfter: true });
   await page.waitForTimeout(350);
+  return { name: matchedRow.name, ...(nativeId === undefined ? {} : { nativeId }) };
 }
 
 async function openParticipantDialog(page: Page): Promise<void> {

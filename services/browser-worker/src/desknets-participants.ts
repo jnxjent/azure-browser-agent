@@ -1,5 +1,35 @@
-import type { Page } from "playwright";
+import type { Locator, Page } from "playwright";
 import type { ParticipantSelector } from "@azure-browser-agent/agent-core";
+
+/** Read native identity; never infer identity from the display name. */
+export async function readParticipantNativeId(row: Locator): Promise<string | undefined> {
+  return row.evaluate(element => {
+    const ids = new Set<string>();
+    for (const node of [element, ...element.querySelectorAll('.name-text,.co-sel-name')]) {
+      const item = (window as any).jQuery?.(node).data('item');
+      if (item?.type === 'user' && /^\d{1,20}$/.test(String(item.id))) ids.add(String(item.id));
+      const ref = node.getAttribute('data-refid') ?? '';
+      if (/^user\d{1,20}$/.test(ref)) ids.add(ref.slice(4));
+    }
+    if (ids.size > 1) throw new Error('参加者のユーザーIDが一致しないため、選択を中止しました。');
+    return [...ids][0];
+  });
+}
+
+export async function readSelectedParticipantIdentities(dialog: Locator): Promise<Array<{ id: string; name: string }>> {
+  const rows = dialog.locator('.co-sel-bottom table tbody tr');
+  const result: Array<{ id: string; name: string }> = [];
+  for (let index = 0; index < await rows.count(); index++) {
+    const row = rows.nth(index);
+    const id = await readParticipantNativeId(row);
+    const name = (await row.locator('.name-text').textContent())?.trim();
+    if (!id || !name || result.some(person => person.id === id)) {
+      throw new Error('選択中の参加者をユーザーIDで一意に確認できません。再検索してください。');
+    }
+    result.push({ id, name });
+  }
+  return result;
+}
 
 const SELF_ORGANIZATION_REFERENCES = new Set([
   "当部",
