@@ -288,30 +288,28 @@ function matchesFacilityQuery(
   normalizedQuery: string,
 ): boolean {
   const normalizedFacilityId = normalizeFacilityName(facilityId);
-  // Office/site names describe a location, not a literal meeting-room name.
-  // Only known locations qualify, so an actual room name is never shortened.
-  const officeLocation = KNOWN_FACILITY_LOCATIONS.find(location =>
-    ["オフィス", "のオフィス", "事務所", "の事務所"].some(suffix => normalizedQuery === location + suffix),
-  );
-  if (officeLocation !== undefined) {
-    return KNOWN_FACILITY_LOCATIONS.find(location => normalizedFacilityId.startsWith(location)) === officeLocation;
-  }
-  const genericRoomAtLocation = normalizedQuery.match(/^(.+?)の(会議室|応接室)$/);
-  if (genericRoomAtLocation !== null) {
-    const [, requestedLocation, requestedType] = genericRoomAtLocation;
-    if (requestedLocation !== undefined && requestedType !== undefined &&
-        KNOWN_FACILITY_LOCATIONS.includes(requestedLocation)) {
-      const facilityLocation = KNOWN_FACILITY_LOCATIONS.find((location) =>
-        normalizedFacilityId.startsWith(location),
-      );
-      return facilityLocation === requestedLocation && normalizedFacilityId.includes(requestedType);
+  // Extract a shared location token rather than comparing an entire phrase
+  // such as アクト事務所内 against the literal equipment name. Longest known
+  // names win (奥山の杜CC must not become 奥山); multiple sites stay explicit.
+  const locations = KNOWN_FACILITY_LOCATIONS.filter(location => normalizedQuery.includes(location))
+    .filter(location => !KNOWN_FACILITY_LOCATIONS.some(other => other !== location && other.includes(location) && normalizedQuery.includes(other)));
+  if (locations.length === 1) {
+    const location = locations[0]!;
+    const remainder = normalizedQuery.replace(location, "")
+      .replace(/の?(?:事務所|オフィス|社屋|拠点|敷地|建物|構内|社内)(?:内)?/g, "")
+      .replace(/^(?:の|内|に|で|ある)+/, "")
+      .replace(/^(?:空いている|空いてる|空き)/, "");
+    const facilityLocation = KNOWN_FACILITY_LOCATIONS.find(candidate => normalizedFacilityId.includes(candidate));
+    const hasRoomQualifier = /室|ルーム|ホール|ブース/.test(remainder);
+    const excludesLocation = /以外|除く|除外|ではない|じゃない/.test(remainder);
+    if (!excludesLocation && (!hasRoomQualifier || ["会議室", "応接室"].includes(remainder))) {
+      const isRoom = normalizedFacilityId.startsWith(location) || /会議|応接|ルーム|研修室|面談室|打合せ|打ち合わせ|ホール|ブース/.test(normalizedFacilityId);
+      return facilityLocation === location && isRoom &&
+        (remainder === "会議室" || remainder === "応接室" ? normalizedFacilityId.includes(remainder) : true);
     }
-  }
-  if (KNOWN_FACILITY_LOCATIONS.includes(normalizedQuery)) {
-    const facilityLocation = KNOWN_FACILITY_LOCATIONS.find((location) =>
-      normalizedFacilityId.startsWith(location),
-    );
-    return facilityLocation === normalizedQuery;
+    // A named room remains a named room. Removing office wording must not
+    // expand 大会議室 or 応接室A to every room at the location.
+    return normalizedFacilityId.includes(normalizedQuery) || normalizedFacilityId.includes(location + remainder);
   }
   return normalizedFacilityId.includes(normalizedQuery);
 }

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { readAvailabilityHalfDay } from "./desknets-intent.js";
 import {
   filterFutureAvailability,
+  facilityMatchesQuery,
   findBookableAvailability,
   findCommonAvailability,
   findMultiLocationAvailability,
@@ -43,6 +44,37 @@ it("recognizes office location aliases without mixing locations or ignoring room
   }
   assert.equal(findBookableAvailability({ ...request, facilityQuery: "アクト応接室" }).length, 0);
   assert.equal(findBookableAvailability({ ...request, facilityQuery: "未知オフィス" }).length, 0);
+});
+
+it("matches shared Act, Aritama and Gotenyama location tokens in office phrases for 30/60 minute searches", () => {
+  const locations = ["アクト", "有玉", "御殿山"];
+  for (const location of locations) {
+    const mainRoom = `${location}大会議室`, labelledRoom = `ミーティングルーム（${location}）`;
+    const facilities = locations.flatMap(site => [
+      { facilityId: `${site}大会議室`, busy: [{ start: "2026-10-29T09:00:00+09:00", end: "2026-10-29T10:00:00+09:00" }] },
+      { facilityId: `ミーティングルーム（${site}）`, busy: [] },
+    ]);
+    for (const phrase of [location, `${location}事務所`, `${location}事務所内`, `${location}の事務所内`, `${location}オフィス内`, `${location}内の部屋`, `${location}事務所内の空き部屋`, `${location}事務所の中`, `${location}事務所内にある部屋`]) {
+      for (const durationMinutes of [30, 60]) {
+        const slots = findBookableAvailability({
+          window: { start: "2026-10-29T09:00:00+09:00", end: "2026-10-29T11:00:00+09:00" },
+          durationMinutes, incrementMinutes: 30,
+          schedules: [{ participantId: "甲斐", busy: [] }, { participantId: "野元", busy: [] }],
+          facilityQuery: phrase, facilities,
+        });
+        assert.equal(slots.length, durationMinutes === 30 ? 4 : 3, phrase);
+        assert.deepEqual(slots[0]?.availableFacilityIds, [labelledRoom], "A busy room stays excluded");
+        assert.ok(slots.every(slot => slot.availableFacilityIds.every(id => id === mainRoom || id === labelledRoom)), "Other sites stay excluded");
+      }
+    }
+    assert.equal(facilityMatchesQuery(mainRoom, `${location}事務所内の大会議室`), true);
+    assert.equal(facilityMatchesQuery(labelledRoom, `${location}大会議室`), false);
+    assert.equal(facilityMatchesQuery(mainRoom, `${location}応接室`), false);
+    assert.equal(facilityMatchesQuery(mainRoom, `${location}事務所内の応接室`), false);
+  }
+  assert.equal(facilityMatchesQuery("有玉大会議室", "アクト事務所内"), false);
+  assert.equal(facilityMatchesQuery("アクト大会議室", "未知事務所内"), false);
+  assert.equal(facilityMatchesQuery("アクト大会議室", "アクト以外"), false);
 });
 
 it("requires people and a free room at both locations in the same hour", () => {
