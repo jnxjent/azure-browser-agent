@@ -77,7 +77,9 @@ export function resolveSelfOrganizationParticipants(
 export function preferParticipantOrganization<T extends { organization: string }>(
   matches: T[], selector: ParticipantSelector,
 ): T[] {
-  if (!selector.organization) return matches;
+  // Search freshness and name matching are checked by the caller. A unique
+  // person does not become ambiguous because a requested department is informal.
+  if (matches.length === 1 || !selector.organization) return matches;
   const requested = normalizeOrganizationForLookup(selector.organization);
   const local = matches.filter(match => normalizeOrganizationForLookup(match.organization).includes(requested));
   return local.length === 0 && selector.organizationFallback ? matches : local;

@@ -115,6 +115,29 @@ test("a unique exact full name wins over an approximate department and prefix ma
   } finally { await browser.close(); }
 });
 
+test("unique surnames continue without confirmation despite informal department labels",async()=>{
+  const browser=await chromium.launch({headless:true});
+  try{
+    const page=await browser.newPage();
+    await page.setContent(`<div class="co-sel-dialog"><ul><li class="co-sel-search"><a href="#">検索</a></li></ul><input name="name"><input name="key"><section class="co-sel-search co-sel-chooser-items"><div class="co-sel-list-scroll"><table class="co-sel-table-list"><tbody></tbody></table></div></section></div>`);
+    await page.evaluate(()=>{
+      const people:Record<string,string>={塚本:"塚本勝己",小早川:"小早川友香",浦手:"浦手恵利"};
+      document.querySelector<HTMLInputElement>('input[name="name"]')!.addEventListener('keydown',event=>{
+        if(event.key!=="Enter")return;
+        const name=(event.target as HTMLInputElement).value;
+        document.querySelector('tbody')!.innerHTML=`<tr><td><span class="co-sel-name">${people[name]}</span><span class="co-busyo-def">総務部</span></td><td class="co-sel-button"><button onclick="this.dataset.selected='true'">追加</button></td></tr>`;
+      });
+    });
+    for(const name of ['塚本','小早川','浦手']){
+      const person=await selectParticipant(page.locator('.co-sel-dialog'),page,{name,organization:'人事グループ'});
+      assert.ok(person.name.startsWith(name));
+      assert.equal(await page.locator("button[data-selected='true']").count(),1);
+    }
+    await selectParticipant(page.locator('.co-sel-dialog'),page,{name:'浦手'});
+    assert.equal(await page.locator("button[data-selected='true']").count(),1);
+  }finally{await browser.close();}
+});
+
 
 test("duplicate exact full names still require disambiguation", async () => {
   const browser = await chromium.launch({ headless: true });

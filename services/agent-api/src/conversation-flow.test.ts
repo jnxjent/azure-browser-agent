@@ -283,7 +283,10 @@ test("an organization reply resumes an open-ended search before intent analysis"
   try {
     const ambiguous = await send("2099年10月5日以降で鈴木さんとの120分の打ち合わせ候補を出して");
     assert.equal(ambiguous.status, "awaiting_user_input");
-    const resumed = await send("候補1で");
+    const conflict = await send("候補1で。鈴木次郎さんで合っています。");
+    assert.equal(conflict.status,"awaiting_user_input");
+    assert.equal(workerCalls,1,"A conflicting number and name must not resume the worker");
+    const resumed = await send("候補１で。鈴木太郎さんで合っています。");
     assert.equal(resumed.status, "completed", JSON.stringify(resumed));
     assert.equal(resumed.task?.type, "find_availability");
     if (resumed.task?.type !== "find_availability") throw new Error("Unexpected resumed task");

@@ -2974,8 +2974,22 @@ export function matchOfferedParticipantCandidate(
   candidates: NonNullable<PendingParticipantChoice["candidates"]>,
 ): { name: string; organization: string } | undefined {
   const normalized = reply.normalize("NFKC").trim();
-  const numbered = normalized.match(/^(?:(?:では|それでは)[、,\s]*)?(?:候補)?\s*(\d+)(?:番|番目)?(?:で|です|を選んで)?[。.!！\s]*$/);
-  if (numbered?.[1] !== undefined) return candidates[Number(numbered[1]) - 1];
+  const numbered = normalized.match(/^(?:(?:では|それでは)[、,\s]*)?(?:候補)?\s*(\d+)(?:番目|番)?(?:です|で|を選んで)?[。.!！\s]*([\s\S]*)$/);
+  const compactName=(value:string)=>value.normalize("NFKC").replace(/\s+/g,"");
+  const confirmedName=(text:string)=>text.replace(/[。.!！\s]+$/,"").match(/^(.+?)(?:さん|氏|様)?(?:で合っています|であっています|で間違いありません|でお願いします|です)$/)?.[1];
+  if (numbered?.[1] !== undefined) {
+    const candidate=candidates[Number(numbered[1])-1];
+    if(!candidate)return;
+    const tail=(numbered[2]??"").replace(/[。.!！\s]+$/,"");
+    if(!tail || tail==="お願いします" || tail==="合っています")return candidate;
+    const name=confirmedName(tail);
+    return name && compactName(name)===compactName(candidate.name)?candidate:undefined;
+  }
+  const confirmation=confirmedName(normalized);
+  if(confirmation){
+    const matches=candidates.filter(candidate=>compactName(candidate.name)===compactName(confirmation));
+    return matches.length===1?matches[0]:undefined;
+  }
   const exactNames = candidates.filter(candidate =>
     normalizeFacilityName(candidate.name) === normalizeFacilityName(normalized));
   if (exactNames.length === 1) return exactNames[0];

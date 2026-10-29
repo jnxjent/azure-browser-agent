@@ -32,6 +32,7 @@ import {
   isParticipantChoiceCancellationRequest,
   isShowCandidatesRequest,
   matchOfferedOrganizations,
+  matchOfferedParticipantCandidate,
   parseFacilityPreferenceTable,
   resolveFacilityWithPreference,
   resolveAutomaticFacilityForSlot,
@@ -43,6 +44,17 @@ import {
   resolveTimeOnlySelection,
   type PendingBookingConversation,
 } from "./server.js";
+
+describe("participant candidate confirmation sentences",()=>{
+  const candidates=[{name:"塚本勝己",organization:"総務部"},{name:"塚本次郎",organization:"営業部"}];
+  for(const reply of ["候補１で。塚本勝己さんで合っています。","候補1で","候補1です","では、1で。塚本勝己さんです。","塚本勝己さんで合っています。"]){
+    it(`accepts ${reply}`,()=>assert.deepEqual(matchOfferedParticipantCandidate(reply,candidates),candidates[0]));
+  }
+  for(const reply of ["候補1で。塚本次郎さんで合っています。","候補1で。来週に変更して","候補0で","候補3で","候補1で。ではなく2で","塚本勝己ではありません"]){
+    it(`refuses conflict or changed conditions: ${reply}`,()=>assert.equal(matchOfferedParticipantCandidate(reply,candidates),undefined));
+  }
+  it("does not select duplicate full names by confirmation alone",()=>assert.equal(matchOfferedParticipantCandidate("塚本勝己さんです",[candidates[0]!,{...candidates[0]!,organization:"別部署"}]),undefined));
+});
 
 describe("profile room defaults", () => {
   it("validates the default room request field", () => {
